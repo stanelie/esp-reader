@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Turn a TeX .pat.txt hyphenation pattern list into the reader's blob format.
 
     python3 tools/build_hyphen_patterns.py hyph-fr.pat.txt device/hyphen_fr.txt

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Offline pagination checks for device/code.py, with hyphenation on.
 
 Hyphenation is the first thing that puts a line break inside a word, and the

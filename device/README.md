@@ -190,13 +190,13 @@ Set `ENABLE_HYPHENATION = False` in `code.py` to turn it off, or delete
 
 | file | origin | licence |
 |---|---|---|
-| `lib/ssd1680e290.py` | original, **except** its partial-update LUT, transcribed from [GxEPD2](https://github.com/ZinggJM/GxEPD2) | see the provenance note in the file - GxEPD2 is GPL-3.0-or-later |
+| `lib/ssd1680e290.py` | original, **except** its partial-update LUT, transcribed from [GxEPD2](https://github.com/ZinggJM/GxEPD2) | GPL-3.0-or-later - the reason this repository is GPL |
 | `lib/lcmen2r13efc1.py` | ported from [todd-herbert/heltec-eink-modules](https://github.com/todd-herbert/heltec-eink-modules) | MIT |
 | `lib/hyphenator.py` | ported from the [Badger 2040 reader](https://github.com/stanelie/badger2040-ebook-reader); algorithm after Ned Batchelder's hyphenate.py | public domain |
 | `hyphen_en.bin` | Knuth-Liang patterns + ushyphmax (Gerard D.C. Kuiken) | public domain |
-| `lib/epub_xtract.py`, `lib/uzipfile.py`, `lib/inflate.py` | from the Badger 2040 reader | same as that repository |
+| `lib/epub_xtract.py`, `lib/uzipfile.py`, `lib/inflate.py` | from the Badger 2040 reader, same author | GPL-3.0-or-later here |
 | `lib/adafruit_framebuf.mpy`, `font5x8.bin` | [Adafruit CircuitPython Bundle](https://github.com/adafruit/Adafruit_CircuitPython_Bundle) | MIT |
-| `lib/propfont.py` | from the [Badger 2040 reader](https://github.com/stanelie/badger2040-ebook-reader) | same as that repository |
+| `lib/propfont.py` | from the [Badger 2040 reader](https://github.com/stanelie/badger2040-ebook-reader), same author | GPL-3.0-or-later here |
 | `fonts/literata*.pf` | [Literata](https://fonts.google.com/specimen/Literata) | SIL Open Font License 1.1 |
 | `fonts/open-sans.pf` | [Open Sans](https://github.com/googlefonts/opensans) | SIL Open Font License 1.1 |
 | `fonts/dejavu.pf` | [DejaVu Sans](https://dejavu-fonts.github.io/) | DejaVu Fonts License (Bitstream Vera derivative) |
@@ -204,3 +204,6 @@ Set `ENABLE_HYPHENATION = False` in `code.py` to turn it off, or delete
 The Adafruit `.mpy` files are compiled for CircuitPython 9.x/10.x. If a future
 CircuitPython release changes the `.mpy` format, replace them from the bundle
 matching your version rather than debugging import errors.
+
+Everything not listed above is original and GPL-3.0-or-later; see `LICENSE`
+in the repository root.

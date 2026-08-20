@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Exercise both panel drivers against stub hardware.
 
 Written because a NameError sat in lcmen2r13efc1.display_partial through three

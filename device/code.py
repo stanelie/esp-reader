@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Streaming e-reader for the Heltec Vision Master E213 and E290.
 #
 # One file, both boards. Of ~1080 lines of code, eleven differ between them:

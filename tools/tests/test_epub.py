@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Offline check that device/lib/epub_xtract.py converts a real EPUB.
 
 Runs the device modules under CPython against a sandbox directory, so nothing

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Subset a BDF font down to the glyphs a text file actually uses.
 
 The Adafruit BDF loader has no glyph index: every load_glyphs() call for an

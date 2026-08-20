@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Fit CAL_SLOPE / CAL_OFFSET from a battery_cal.csv produced on the device.
 
     python3 tools/battery_fit.py /media/.../CIRCUITPY/battery_cal.csv

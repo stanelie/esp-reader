@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Per-book reading positions kept in the ESP32's NVM.
 
 NVM is small and there is no room for an unbounded list, so positions live in a

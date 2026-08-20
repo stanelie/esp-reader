@@ -80,21 +80,32 @@ cable is attached, which is what keeps a bad edit recoverable.
   there is dropped without a word and you get a firmware that looks right and
   still spins on WFI.
 
-## Licensing, before this goes public
+## Licence
 
-Most of this is original, but three pieces are not, and one needs a decision:
+**GPL-3.0-or-later.** Full text in [`LICENSE`](LICENSE); every source file
+carries an SPDX header.
 
-- `device/lib/ssd1680e290.py` is original **except** its 153-byte partial-update
-  LUT, transcribed from GxEPD2, which is **GPL-3.0-or-later**. Whether a panel
-  waveform table carries copyright is arguable — it is closer to a hardware fact
-  than to code, and Waveshare publish equivalent tables in their own sample
-  drivers — but it should be a deliberate choice, not an oversight. The
-  provenance is recorded in the file.
-- `device/lib/lcmen2r13efc1.py` is a port of
-  [todd-herbert/heltec-eink-modules](https://github.com/todd-herbert/heltec-eink-modules), MIT.
-- The Adafruit libraries are MIT; the Literata subsets are under the SIL Open
-  Font License 1.1. Full table in [`device/README.md`](device/README.md).
+The deciding factor is `device/lib/ssd1680e290.py`. The file is original except
+for its 153-byte partial-update LUT, which was transcribed from
+[GxEPD2](https://github.com/ZinggJM/GxEPD2) (GPL-3.0-or-later) — and that table
+is not incidental, it is what makes partial refresh work on this panel at all.
+Whether a waveform table carries copyright is arguable, but GPL settles it
+either way rather than resting the whole repository on the argument. If you want
+that driver under a permissive licence, re-derive the waveform from the SSD1680
+datasheet; nothing else in the file is encumbered.
 
-`firmware/patches/` modifies CircuitPython, which is MIT.
+Everything the GPL is layered over stays under its own terms, and all of it is
+GPL-compatible:
+
+- `device/lib/lcmen2r13efc1.py` — MIT, a port of
+  [todd-herbert/heltec-eink-modules](https://github.com/todd-herbert/heltec-eink-modules).
+  It contains no GPL material and keeps its MIT header.
+- Adafruit libraries — MIT. `firmware/patches/` modifies CircuitPython — MIT.
+- Literata and Open Sans — SIL Open Font License 1.1. DejaVu Sans — Bitstream
+  Vera derivative. The `.pf` files are rasterised subsets, and both licences
+  permit that.
+- The hyphenation patterns are Knuth-Liang plus ushyphmax — public domain.
+
+Per-file table in [`device/README.md`](device/README.md).
 
 **Do not commit books.** `.gitignore` excludes `device/*.txt` for that reason.

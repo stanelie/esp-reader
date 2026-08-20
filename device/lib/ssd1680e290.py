@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Driver for the Heltec Vision Master E290 e-paper panel (296x128, SSD1680).
 
 Written to be a drop-in replacement for the E213's LCMEN2R13EFC1 driver: same
@@ -74,13 +75,16 @@ _BORDER = 0x05
 # phase fields (00 ground, 01 VSH1, 10 VSL, 11 VSH2) and a wrong one drives the
 # panel with a waveform its pigment was not characterised for.
 #
-# PROVENANCE, and read this before publishing: GxEPD2 is GPL-3.0-or-later. The
-# rest of this file is original, but this table was transcribed from it. Whether
-# a panel waveform table carries copyright at all is arguable - it is closer to
-# a hardware fact than to code, and Waveshare publish equivalent tables in their
-# own sample drivers - but the honest thing is to record where it came from and
-# let whoever licenses this repository decide, rather than to quietly assert MIT
-# over the whole file.
+# PROVENANCE: transcribed from GxEPD2, which is GPL-3.0-or-later. The rest of
+# this file is original. Whether a panel waveform table carries copyright at all
+# is arguable - it is closer to a hardware fact than to code, and Waveshare
+# publish equivalent tables in their own sample drivers - but rather than lean on
+# that argument, this repository is licensed GPL-3.0-or-later, which is
+# compatible with GxEPD2 whichever way the question falls. See LICENSE.
+#
+# The practical consequence: if you want this driver under a permissive licence,
+# re-derive the waveform from the SSD1680 datasheet instead of copying this
+# table. Nothing else in the file is encumbered.
 _LUT_PARTIAL = bytes([
     0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

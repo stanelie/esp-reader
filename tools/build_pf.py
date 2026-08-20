@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Host-side tool: convert a TTF/OTF into the reader's compact 1-bit
 proportional bitmap font (.pf). Needs Pillow. Runs on a desktop, not the Badger.
 

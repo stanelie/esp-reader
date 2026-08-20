@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Convert a BDF bitmap font to PCF, for adafruit_bitmap_font on CircuitPython.
 
 WHY THIS EXISTS

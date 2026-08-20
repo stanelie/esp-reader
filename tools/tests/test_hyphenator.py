@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Offline checks for device/lib/hyphenator.py.
 
 The port must not have changed anything. The implementation it came from was

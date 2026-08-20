@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Rotate a landscape 1-bit framebuffer into the panel's native orientation.
 
 Why this exists: text is drawn into a landscape buffer so a glyph's row of

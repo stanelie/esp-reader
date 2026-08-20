@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """On-device hyphenation (Frank Liang's algorithm, as used by TeX).
 
 Ported verbatim from the Badger 2040 reader, where it was validated against Ned

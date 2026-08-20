@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Battery ADC calibration logger. Copy over code.py on the device, run it on
 # battery power, restore the reader afterwards:
 #

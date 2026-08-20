@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Rasterise a TTF/OTF to a BDF subset, for tools/bdf2pcf.py to turn into PCF.
 
     python3 tools/ttf2bdf.py Literata.ttf 14 device/fonts/literata-14-r.bdf [Family] [weight]

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Minimal proportional 1-bit bitmap font renderer for the Badger reader.
 
 Loads a `.pf` font (see build_literata.py for the format) as one small bytes
