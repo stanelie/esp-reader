@@ -1,0 +1,11 @@
+# Books. Do not commit these - they are usually someone else's copyright, and
+# they are the bulk of the drive.
+device/*.txt
+!device/demobook.txt
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# CircuitPython writes this on the drive; it describes the firmware, not the repo.
+device/boot_out.txt

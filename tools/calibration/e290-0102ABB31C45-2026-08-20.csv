@@ -1,0 +1,16 @@
+# Heltec Vision Master E290, UID 0102ABB31C45.
+# PPK2 sourcing the battery input, USB disconnected, 128 samples per reading,
+# 15 ms settle. Three readings per voltage; the medians came back identical to
+# the count at every voltage.
+# Rows 4 and 7 had ~40% of their samples railed at 62297, which is why `mean`
+# is nonsense there and `median` is not.
+idx,volts,settle_ms,n,mean,median,min,max,spread,railed,temp_c
+1,3.40,15,128,11569.0,11577.0,11518,11617,99,0,28.8
+2,3.40,15,128,11570.0,11577.0,11518,11617,99,0,27.8
+3,3.40,15,128,11569.7,11577.0,11498,11637,139,0,27.8
+4,3.70,15,128,32615.4,14219.0,14159,62297,48138,50,27.8
+5,3.70,15,128,14211.6,14219.0,14159,14377,218,0,27.8
+6,3.70,15,128,14215.9,14219.0,14159,14377,218,0,27.8
+7,4.20,15,128,34329.1,16066.0,16066,62297,46231,51,28.8
+8,4.20,15,128,16066.8,16066.0,16006,16244,238,0,28.8
+9,4.20,15,128,16066.8,16066.0,16046,16205,159,0,28.8

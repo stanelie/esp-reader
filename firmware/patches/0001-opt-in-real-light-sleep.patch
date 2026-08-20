@@ -1,0 +1,60 @@
+--- a/ports/espressif/common-hal/alarm/__init__.c	2026-08-17 12:33:06.777086227 -0400
++++ b/ports/espressif/common-hal/alarm/__init__.c	2026-08-17 12:33:06.797142645 -0400
+@@ -139,6 +139,49 @@
+ 
+     mp_obj_t wake_alarm = mp_const_none;
+ 
++    #if defined(CIRCUITPY_ESP_REAL_LIGHT_SLEEP) && CIRCUITPY_ESP_REAL_LIGHT_SLEEP
++    // Real, power-gated light sleep. Upstream declines to do this because
++    // esp_light_sleep_start() shuts down all non-RTC peripherals, so every
++    // busio/pwmio/keypad object the application holds must be rebuilt after
++    // this returns. Measured on an ESP32-S3: 43 mA for the WFI loop below,
++    // 1.1 mA for this.
++    esp_light_sleep_start();
++
++    // Deliberately NOT _get_wakeup_cause(false). On the light-sleep path that
++    // helper consults only software flags, and the TimeAlarm flag is set by
++    // timer_callback() dispatched with ESP_TIMER_TASK -- a separate FreeRTOS
++    // task that has not necessarily been scheduled by the time we get here.
++    // Losing that race leaves the flag clear, and because
++    // esp_sleep_enable_timer_wakeup() is still armed the caller silently sleeps
++    // another full period. Read the hardware cause, which is valid immediately.
++    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
++    switch (cause) {
++        case ESP_SLEEP_WAKEUP_TIMER:
++            wake_alarm = alarm_time_timealarm_find_triggered_alarm(n_alarms, alarms);
++            break;
++        case ESP_SLEEP_WAKEUP_GPIO:
++        case ESP_SLEEP_WAKEUP_EXT0:
++        case ESP_SLEEP_WAKEUP_EXT1:
++            wake_alarm = alarm_pin_pinalarm_find_triggered_alarm(n_alarms, alarms);
++            break;
++        #if CIRCUITPY_ALARM_TOUCH
++        case ESP_SLEEP_WAKEUP_TOUCHPAD:
++            wake_alarm = alarm_touch_touchalarm_find_triggered_alarm(n_alarms, alarms);
++            break;
++        #endif
++        #if CIRCUITPY_ESPULP
++        case ESP_SLEEP_WAKEUP_ULP:
++            wake_alarm = espulp_ulpalarm_find_triggered_alarm(n_alarms, alarms);
++            break;
++        #endif
++        default:
++            break;
++    }
++    shared_alarm_save_wake_alarm(wake_alarm);
++    alarm_reset();
++    return wake_alarm;
++    #else
++
+     // We cannot esp_light_sleep_start() here because it shuts down all non-RTC peripherals.
+     while (!mp_hal_is_interrupted()) {
+         RUN_BACKGROUND_TASKS;
+@@ -182,6 +225,7 @@
+ 
+     alarm_reset();
+     return wake_alarm;
++    #endif
+ }
+ 
+ void common_hal_alarm_set_deep_sleep_alarms(size_t n_alarms, const mp_obj_t *alarms, size_t n_dios, digitalio_digitalinout_obj_t *preserve_dios[]) {
