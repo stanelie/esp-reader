@@ -61,7 +61,11 @@ def build(hyphenate):
     env = {
         "get_string_width": measure,
         "MAX_LINE_WIDTH_PX": 292,          # E290
-        "MAX_LINES_PER_PAGE": (128 - 2) // (font.box_h + 0),
+        # Room kept clear on line one for the battery readout. The reader
+        # reserves it while wrapping, so pagination has to know about it here
+        # or this harness measures a layout the device never produces.
+        "STATUS_RESERVE_PX": 30,
+        "MAX_LINES_PER_PAGE": (128 - 0 - font.box_h) // (font.box_h + 0) + 1,
         "SPACE_WIDTH": measure(" "),
         "hyphenate_ok": hyphenate,
         "hyphenator": hyphenator,

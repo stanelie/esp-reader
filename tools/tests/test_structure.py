@@ -26,7 +26,7 @@ FUNCTIONS = """
     draw_text_justified new_canvas begin_frame end_frame to_font fit_text
     list_books list_epubs epub_txt_path book_title read_page_stream
     get_page_lines render_page_buffer render_list picker_label render_message
-    render_goto_screen render_sleep_screen choose_from_list run_picker run_goto
+    render_sleep_screen choose_from_list run_picker run_goto
     run_fonts open_picker convert_epub turn_forward turn_back jump_to_percent
     reflow_current_page switch_to_book save_position build_display
     teardown_display build_keys enter_light_sleep enter_deep_sleep
@@ -39,6 +39,24 @@ ASSIGNMENTS = """
     SAVE_EVERY_N_TURNS JUSTIFY_TEXT ENABLE_EPUB ENABLE_HYPHENATION
     _font_index _FONT_NVM_OFFSET WIDTH
 """.split()
+
+
+def check_lazy():
+    # The moved code still has to exist and still has to expose its entry
+    # point. Losing that is silent: code.py catches the ImportError and simply
+    # reports the feature unavailable.
+    bad = 0
+    for name, entry in (("gotoui", "run"), ("convertui", "convert")):
+        path = os.path.join(ROOT, "device", "lib", name + ".py")
+        if not os.path.exists(path):
+            print("  MISSING lazy module: %s" % name); bad += 1; continue
+        tree = ast.parse(open(path).read())
+        names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+        if entry not in names:
+            print("  %s.py has no %s()" % (name, entry)); bad += 1
+        else:
+            print("  lazy module %-10s exports %s()" % (name, entry))
+    return bad
 
 
 def main():

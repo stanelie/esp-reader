@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Minimal proportional 1-bit bitmap font renderer for the Badger reader.
-
-Loads a `.pf` font (see build_literata.py for the format) as one small bytes
-blob and blits glyphs into an adafruit_framebuf.FrameBuffer. Also provides pixel
-width metrics so the layout engine can wrap/justify/hyphenate in pixels instead
-of character counts.
-"""
+# Minimal proportional 1-bit bitmap font renderer for the Badger reader.
+#
+# Loads a `.pf` font (see build_literata.py for the format) as one small bytes
+# blob and blits glyphs into an adafruit_framebuf.FrameBuffer. Also provides pixel
+# width metrics so the layout engine can wrap/justify/hyphenate in pixels instead
+# of character counts.
 
 
 class PropFont:
@@ -72,10 +71,10 @@ class PropFont:
             self._gbuf = bytearray(self.box_h * ((widest + 7) // 8) or 1)
 
     def _glyph(self, off, n):
-        """Return (data, base) for a glyph's `n` bitmap bytes at file offset
-        `off`. In memory that is the blob itself; file-backed it is one read
-        into the scratch buffer, so a glyph costs a seek rather than a seek per
-        byte."""
+        # Return (data, base) for a glyph's `n` bitmap bytes at file offset
+        #         `off`. In memory that is the blob itself; file-backed it is one read
+        #         into the scratch buffer, so a glyph costs a seek rather than a seek per
+        #         byte.
         if self._f is None:
             return self.d, off
         self._f.seek(off)
@@ -86,7 +85,7 @@ class PropFont:
         return self._gbuf, 0
 
     def deinit(self):
-        """Close the font file, for a file-backed font."""
+        # Close the font file, for a file-backed font.
         if self._f is not None:
             try:
                 self._f.close()
@@ -113,13 +112,13 @@ class PropFont:
         return w
 
     def draw(self, fb, s, x, y, color=1, extra_each=0, extra_first=0):
-        """Blit `s` at (x, y) top-left. `extra_each` px is added to every space
-        advance and `extra_first` more spaces get one extra px (for justified
-        line filling). Returns the final pen x.
-
-        Writes bytes straight into the framebuffer's buffer (MHMSB) instead of
-        calling fb.pixel() per lit pixel - the latter is far too slow on the
-        RP2040. Falls back to fb.pixel() if the buffer isn't exposed."""
+        # Blit `s` at (x, y) top-left. `extra_each` px is added to every space
+        #         advance and `extra_first` more spaces get one extra px (for justified
+        #         line filling). Returns the final pen x.
+        #
+        #         Writes bytes straight into the framebuffer's buffer (MHMSB) instead of
+        #         calling fb.pixel() per lit pixel - the latter is far too slow on the
+        #         RP2040. Falls back to fb.pixel() if the buffer isn't exposed.
         buf = getattr(fb, "buf", None)
         if buf is None:
             return self._draw_slow(fb, s, x, y, color, extra_each, extra_first)
@@ -231,7 +230,7 @@ class PropFont:
         return x
 
     def draw_justified(self, fb, s, x, y, color, target_width):
-        """Draw `s` stretched to `target_width` px by widening its spaces."""
+        # Draw `s` stretched to `target_width` px by widening its spaces.
         spaces = s.count(" ")
         extra = target_width - self.text_width(s)
         if spaces == 0 or extra <= 0:

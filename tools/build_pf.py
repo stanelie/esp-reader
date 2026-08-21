@@ -45,6 +45,12 @@ WEIGHT = int(sys.argv[5]) if len(sys.argv) > 5 else 400
 # letters such as the Scandinavian a-ring) and never from the bottom, because
 # descenders - including the cedilla French needs for 'c' - must stay intact.
 MAXBOX = int(sys.argv[6]) if len(sys.argv) > 6 else 15
+# Optical size, when the font has that axis. Defaults to the pixel size, which
+# is the conventional choice, but it is worth setting explicitly: Literata's
+# lower optical sizes are drawn wider and sturdier on purpose - that is what
+# the axis is for - so a smaller opsz at the same pixel size buys legibility
+# without buying height, and height is what costs a line on the page.
+OPSZ = int(sys.argv[7]) if len(sys.argv) > 7 else None
 
 # Space through the end of Latin-1, so accented text (French, Spanish, German,
 # ...) renders instead of falling back to '?'. U+007F-U+009F are control codes
@@ -65,7 +71,7 @@ try:
         if "weight" in nm:
             vals.append(WEIGHT)
         elif "optical" in nm:
-            vals.append(SIZE)
+            vals.append(OPSZ if OPSZ is not None else SIZE)
         else:
             vals.append(ax.get("default", 0))
     font.set_variation_by_axes(vals)

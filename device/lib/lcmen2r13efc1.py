@@ -70,7 +70,7 @@ LUT_BB_PARTIAL = bytes([
 
 class LCMEN2R13EFC1:
     def __init__(self, spi, cs_pin, dc_pin, reset_pin, busy_pin, baudrate=4000000,
-                 keep_powered=True, rotation=1):
+                 keep_powered=True, rotation=1, previous=None):
         self.spi = spi
         self.cs = cs_pin
         self.dc = dc_pin
@@ -120,27 +120,43 @@ class LCMEN2R13EFC1:
 
         # True between starting a refresh and collecting it - see _wait_ready.
         self._busy_pending = False
-        self.previous_buffer = bytearray(b"\xFF" * self.buffer_size)
+        # Taken from the caller when offered. The reader claims every screen-sized
+        # buffer before anything else runs, because this heap does not compact and
+        # a 4736-byte block asked for late is the one that fails - see the claim
+        # block at the top of code.py.
+        if previous is not None:
+            self.previous_buffer = previous
+            # Chunked, not a per-byte loop: 4736 iterations of Python is ~5ms
+            # of boot for no reason. Not b"\xFF" * buffer_size either - that
+            # allocates a second screen-sized object, which is the thing this
+            # whole arrangement exists to avoid.
+            _ff = b"\xFF" * 64
+            for _i in range(0, self.buffer_size - 63, 64):
+                self.previous_buffer[_i:_i + 64] = _ff
+            for _i in range((self.buffer_size // 64) * 64, self.buffer_size):
+                self.previous_buffer[_i] = 0xFF
+        else:
+            self.previous_buffer = bytearray(b"\xFF" * self.buffer_size)
         self.reset()
 
     def set_previous(self, native_buf):
-        """Tell the driver what is on the panel. Buffers here are native."""
+        # Tell the driver what is on the panel. Buffers here are native.
         self.previous_buffer[:] = native_buf
 
     def _wait_ready(self):
-        """Collect a deferred refresh, if one is still running.
-
-        DISPLAY_REFRESH does not need the bus once started - the panel drives
-        itself from its own RAM - so the wait for it is deferred to whatever
-        touches the panel next. That lets the caller pre-render the following
-        page, or carry on converting a book, while this one is still drawing.
-        """
+        # Collect a deferred refresh, if one is still running.
+        #
+        #         DISPLAY_REFRESH does not need the bus once started - the panel drives
+        #         itself from its own RAM - so the wait for it is deferred to whatever
+        #         touches the panel next. That lets the caller pre-render the following
+        #         page, or carry on converting a book, while this one is still drawing.
+        #
         if self._busy_pending:
             self.wait_busy()
             self._busy_pending = False
 
     def power_down(self):
-        """Drop the panel's DC/DC rails. Call before sleeping."""
+        # Drop the panel's DC/DC rails. Call before sleeping.
         self._wait_ready()
         if not self.powered:
             return
@@ -149,13 +165,13 @@ class LCMEN2R13EFC1:
         self.powered = False
 
     def release_bus(self):
-        """Hand the SPI bus back. Call before the program exits or sleeps.
-
-        The lock is taken once in __init__ and held, which is what keeps each
-        refresh cheap. The cost is that exiting while still holding it stops
-        CircuitPython from entering its post-program "press any key to enter the
-        REPL" wait, leaving a serial host unable to reach the board at all.
-        """
+        # Hand the SPI bus back. Call before the program exits or sleeps.
+        #
+        #         The lock is taken once in __init__ and held, which is what keeps each
+        #         refresh cheap. The cost is that exiting while still holding it stops
+        #         CircuitPython from entering its post-program "press any key to enter the
+        #         REPL" wait, leaving a serial host unable to reach the board at all.
+        #
         # As in ssd1680e290.release_bus: the panel would finish without the
         # bus, but a refresh cut short by the rails dropping leaves a
         # half-drawn page.
@@ -197,7 +213,7 @@ class LCMEN2R13EFC1:
             time.sleep(0.005)
 
     def display_full(self, new_buffer):
-        """The flashing refresh: every pixel driven, no ghosting left behind."""
+        # The flashing refresh: every pixel driven, no ghosting left behind.
         self._wait_ready()
         self.send_command(_PANEL_SETTING)
         self.send_data(0xDF)
@@ -226,7 +242,7 @@ class LCMEN2R13EFC1:
         self.previous_buffer[:] = new_buffer
 
     def display_partial(self, new_buffer):
-        """The fast refresh, using the partial LUTs loaded below."""
+        # The fast refresh, using the partial LUTs loaded below.
         self._wait_ready()
         self.send_command(_PANEL_SETTING)
         self.send_data(0xFF)

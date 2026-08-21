@@ -1,26 +1,27 @@
 # SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""On-device hyphenation (Frank Liang's algorithm, as used by TeX).
+# On-device hyphenation (Frank Liang's algorithm, as used by TeX).
+#
+# Ported verbatim from the Badger 2040 reader, where it was validated against Ned
+# Batchelder's reference hyphenate.py over 234,000 words. Only the pattern path
+# differs. tools/tests/test_hyphenator.py re-runs that comparison over the system
+# word list and requires identical output, so the port stays honest.
+#
+# English only. The patterns are language-specific and mixing sets produces bad
+# breaks in both, so another language means another blob and a way to choose
+# between them - see tools/build_hyphen_patterns.py, which already handles the
+# latin-1 folding French would need.
+#
+# The ~4900 patterns live in `hyphen_en.bin` as a single sorted, newline-delimited
+# blob, loaded once into one bytes object (~31 KB) and binary-searched in place -
+# no per-pattern Python objects, no big dict. That was to fit an RP2040; here it
+# is simply cheap.
+#
+# Patterns and exceptions are public domain (Knuth & Liang; ushyphmax by
+# Gerard D.C. Kuiken). Algorithm after Ned Batchelder's public-domain
+# hyphenate.py; this implementation reproduces its output exactly.
+import os
 
-Ported verbatim from the Badger 2040 reader, where it was validated against Ned
-Batchelder's reference hyphenate.py over 234,000 words. Only the pattern path
-differs. tools/tests/test_hyphenator.py re-runs that comparison over the system
-word list and requires identical output, so the port stays honest.
-
-English only. The patterns are language-specific and mixing sets produces bad
-breaks in both, so another language means another blob and a way to choose
-between them - see tools/build_hyphen_patterns.py, which already handles the
-latin-1 folding French would need.
-
-The ~4900 patterns live in `hyphen_en.bin` as a single sorted, newline-delimited
-blob, loaded once into one bytes object (~31 KB) and binary-searched in place -
-no per-pattern Python objects, no big dict. That was to fit an RP2040; here it
-is simply cheap.
-
-Patterns and exceptions are public domain (Knuth & Liang; ushyphmax by
-Gerard D.C. Kuiken). Algorithm after Ned Batchelder's public-domain
-hyphenate.py; this implementation reproduces its output exactly.
-"""
 
 _PATTERNS_PATH = "/hyphen_en.bin"
 _LETTERS_MAX = 9  # longest pattern key (letters incl. boundary dots)
@@ -63,17 +64,34 @@ _BLOB = None
 
 
 def _load():
+    # Read the pattern blob as ONE exact-size allocation.
+    #
+    #     Not f.read(): with no size to work from it grows a buffer by doubling and
+    #     copying, so peak demand is the final size plus the previous one, and every
+    #     intermediate buffer is freed into a hole. On the RP2040 that is the
+    #     difference between fitting and not - the failures reported wanting 7168,
+    #     18944 and 28416 bytes on successive boots, which is the doubling, not the
+    #     blob. Stat the file, take the buffer in one piece, read into it.
+    #
+    #     A bytearray rather than bytes: bytes(buf) would copy it, needing both at
+    #     once, which is the thing being avoided. Everything here only indexes _BLOB.
+    #
     global _BLOB
     if _BLOB is None:
+        size = os.stat(_PATTERNS_PATH)[6]
+        buf = bytearray(size)
         with open(_PATTERNS_PATH, "rb") as f:
-            _BLOB = f.read()
+            got = f.readinto(buf)
+        if got != size:
+            raise OSError("short read: %d of %d bytes" % (got, size))
+        _BLOB = buf
     return _BLOB
 
 
 def _cmp_key(blob, ls, le, kbuf, ks, ke):
-    """Compare the letters-only key of pattern line blob[ls:le] against
-    kbuf[ks:ke], lexicographically, without allocating (no slice of either
-    buffer is ever materialized). Returns -1, 0 or 1."""
+    # Compare the letters-only key of pattern line blob[ls:le] against
+    #     kbuf[ks:ke], lexicographically, without allocating (no slice of either
+    #     buffer is ever materialized). Returns -1, 0 or 1.
     ki = ks
     p = ls
     while p < le:
@@ -106,15 +124,15 @@ def _points_at(blob, ls, le):
 
 
 def _lookup(kbuf, ks, ke):
-    """Binary-search the sorted, newline-delimited blob for a pattern whose
-    letters-only key equals kbuf[ks:ke]. Return its digit vector or None.
-
-    Takes a buffer + range instead of a pre-sliced key so the caller never
-    allocates a new bytes object per candidate substring - hyphenate() tries
-    O(word_length * _LETTERS_MAX) substrings per word, and materializing each
-    one was generating enough short-lived garbage to fragment the RP2040 heap
-    over a reading session (observed as a MemoryError much later, in an
-    unrelated large allocation like the display's framebuffer rotation)."""
+    # Binary-search the sorted, newline-delimited blob for a pattern whose
+    #     letters-only key equals kbuf[ks:ke]. Return its digit vector or None.
+    #
+    #     Takes a buffer + range instead of a pre-sliced key so the caller never
+    #     allocates a new bytes object per candidate substring - hyphenate() tries
+    #     O(word_length * _LETTERS_MAX) substrings per word, and materializing each
+    #     one was generating enough short-lived garbage to fragment the RP2040 heap
+    #     over a reading session (observed as a MemoryError much later, in an
+    #     unrelated large allocation like the display's framebuffer rotation).
     blob = _BLOB
     lo = 0
     hi = len(blob)
@@ -135,7 +153,7 @@ def _lookup(kbuf, ks, ke):
 
 
 def hyphenate(word):
-    """Return `word` split into pieces at legal hyphenation points."""
+    # Return `word` split into pieces at legal hyphenation points.
     if len(word) <= 4:
         return [word]
     lw = word.lower()
@@ -172,13 +190,13 @@ def hyphenate(word):
 
 
 def hyphenate_split(word, space_left, measure=len):
-    """Split `word` for line-wrapping. Return (head, rest) where `head` is the
-    exact text to place on the current line - it already includes its trailing
-    hyphen, whether that hyphen was added by Liang's algorithm or was already in
-    the word - and `rest` continues on the next line. `head` must satisfy
-    measure(head) <= space_left and is the longest such legal break, or
-    (None, None) if the word can't/shouldn't be broken here. `measure` lets the
-    caller budget in pixels (proportional font) instead of characters."""
+    # Split `word` for line-wrapping. Return (head, rest) where `head` is the
+    #     exact text to place on the current line - it already includes its trailing
+    #     hyphen, whether that hyphen was added by Liang's algorithm or was already in
+    #     the word - and `rest` continues on the next line. `head` must satisfy
+    #     measure(head) <= space_left and is the longest such legal break, or
+    #     (None, None) if the word can't/shouldn't be broken here. `measure` lets the
+    #     caller budget in pixels (proportional font) instead of characters.
     if _breakable(word):
         # The word already contains a dash, so break right after one. The dash
         # is in the text, so `head` is just the prefix up to and including it -

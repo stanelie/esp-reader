@@ -1,25 +1,24 @@
 # SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Per-book reading positions kept in the ESP32's NVM.
-
-NVM is small and there is no room for an unbounded list, so positions live in a
-fixed ring of slots that churns: books no longer present on the device are
-cleared first, and after that the least recently opened slot is evicted.
-
-Books are identified by a 32-bit hash of their path rather than by name, which
-keeps a slot to 10 bytes and costs nothing to match - the reader hashes the
-files it can actually see and looks for the stored hash among them.
-
-Layout, big-endian:
-    0..1    magic
-    2       format version
-    3       number of slots this layout uses
-    4..7    hash of the book being read
-    8..9    LRU clock
-    10..    slots of 10 bytes: hash (4), offset (4), last-opened tick (2)
-
-A slot whose hash is 0 is free.
-"""
+# Per-book reading positions kept in the ESP32's NVM.
+#
+# NVM is small and there is no room for an unbounded list, so positions live in a
+# fixed ring of slots that churns: books no longer present on the device are
+# cleared first, and after that the least recently opened slot is evicted.
+#
+# Books are identified by a 32-bit hash of their path rather than by name, which
+# keeps a slot to 10 bytes and costs nothing to match - the reader hashes the
+# files it can actually see and looks for the stored hash among them.
+#
+# Layout, big-endian:
+#     0..1    magic
+#     2       format version
+#     3       number of slots this layout uses
+#     4..7    hash of the book being read
+#     8..9    LRU clock
+#     10..    slots of 10 bytes: hash (4), offset (4), last-opened tick (2)
+#
+# A slot whose hash is 0 is free.
 import struct
 
 import microcontroller
@@ -34,12 +33,12 @@ CLOCK_MAX = 0xFFFF
 
 
 def _is_free(h):
-    """Erased NVM reads back as 0xFF (or 0x00), so both mean 'no book here'."""
+    # Erased NVM reads back as 0xFF (or 0x00), so both mean 'no book here'.
     return h == 0 or h == 0xFFFFFFFF
 
 
 def name_hash(name):
-    """FNV-1a over the path. Never returns 0, which marks a free slot."""
+    # FNV-1a over the path. Never returns 0, which marks a free slot.
     h = 0x811C9DC5
     for b in name.encode("utf-8"):
         h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
@@ -113,7 +112,7 @@ class Bookmarks:
         return -1
 
     def _renumber(self):
-        """Compact tick values so the 16-bit clock can keep counting."""
+        # Compact tick values so the 16-bit clock can keep counting.
         live = sorted((self.table[i][2], i)
                       for i in range(self.slots) if not _is_free(self.table[i][0]))
         for rank, (_, i) in enumerate(live):
@@ -136,12 +135,12 @@ class Bookmarks:
 
     # --- public API ------------------------------------------------------
     def get(self, name):
-        """Saved offset for name, or 0 if it has no slot."""
+        # Saved offset for name, or 0 if it has no slot.
         i = self._find(name_hash(name))
         return self.table[i][1] if i >= 0 else 0
 
     def open(self, name, present=()):
-        """Mark name as the book being read; returns its saved offset."""
+        # Mark name as the book being read; returns its saved offset.
         if not self.slots:
             return 0
 
@@ -168,7 +167,7 @@ class Bookmarks:
         return slot[1]
 
     def save(self, name, offset):
-        """Store a reading position, writing only when it actually changed."""
+        # Store a reading position, writing only when it actually changed.
         if not self.slots:
             return
         i = self._find(name_hash(name))
@@ -182,7 +181,7 @@ class Bookmarks:
             self._write_slot(i)
 
     def match(self, names):
-        """Which of names is the book that was open last, if any."""
+        # Which of names is the book that was open last, if any.
         if not self.current:
             return None
         for name in names:
@@ -191,7 +190,7 @@ class Bookmarks:
         return None
 
     def prune(self, present):
-        """Clear slots for books no longer on the device. Returns how many."""
+        # Clear slots for books no longer on the device. Returns how many.
         if not self.slots:
             return 0
         keep = tuple(name_hash(n) for n in present)
@@ -204,7 +203,7 @@ class Bookmarks:
         return dropped
 
     def migrate_legacy(self, name):
-        """Carry a position written by the old single-book format into a slot."""
+        # Carry a position written by the old single-book format into a slot.
         if not self.slots:
             return False
         try:

@@ -1,25 +1,24 @@
 # SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Driver for the Heltec Vision Master E290 e-paper panel (296x128, SSD1680).
-
-Written to be a drop-in replacement for the E213's LCMEN2R13EFC1 driver: same
-constructor signature, same width/height/bytes_per_row/buffer_size attributes,
-same previous_buffer, display_full(), display_partial(), power_down() and
-release_bus(). Everything above the driver in the reader is unchanged.
-
-The two panels share nothing at the command level. The E213 is UC8151-class:
-0x12 is *refresh*, image data goes out through 0x10/0x13, the partial waveform
-is uploaded as five LUTs into 0x20-0x24, and the DC/DC rails are raised and
-dropped by hand with 0x04/0x02. The E290 is SSD1680-class: 0x12 is *soft reset*,
-image data goes to 0x24 (and the previous frame to 0x26), the update is kicked
-off with 0x22/0x20, and there is no separate power-on step at all - the mode
-byte written to 0x22 tells the controller to bring the analog block up and take
-it down again as part of the update.
-
-Command values and panel geometry follow the CircuitPython board definition for
-this board (ports/espressif/boards/heltec_vision_master_e290/board.c), which is
-the one source attested on this exact hardware.
-"""
+# Driver for the Heltec Vision Master E290 e-paper panel (296x128, SSD1680).
+#
+# Written to be a drop-in replacement for the E213's LCMEN2R13EFC1 driver: same
+# constructor signature, same width/height/bytes_per_row/buffer_size attributes,
+# same previous_buffer, display_full(), display_partial(), power_down() and
+# release_bus(). Everything above the driver in the reader is unchanged.
+#
+# The two panels share nothing at the command level. The E213 is UC8151-class:
+# 0x12 is *refresh*, image data goes out through 0x10/0x13, the partial waveform
+# is uploaded as five LUTs into 0x20-0x24, and the DC/DC rails are raised and
+# dropped by hand with 0x04/0x02. The E290 is SSD1680-class: 0x12 is *soft reset*,
+# image data goes to 0x24 (and the previous frame to 0x26), the update is kicked
+# off with 0x22/0x20, and there is no separate power-on step at all - the mode
+# byte written to 0x22 tells the controller to bring the analog block up and take
+# it down again as part of the update.
+#
+# Command values and panel geometry follow the CircuitPython board definition for
+# this board (ports/espressif/boards/heltec_vision_master_e290/board.c), which is
+# the one source attested on this exact hardware.
 
 import time
 import digitalio
@@ -117,7 +116,7 @@ _X_BYTE_START = 1
 
 class SSD1680E290:
     def __init__(self, spi, cs_pin, dc_pin, reset_pin, busy_pin, baudrate=4000000,
-                 keep_powered=True, rotation=3):
+                 keep_powered=True, rotation=3, previous=None):
         self.spi = spi
         self.cs = cs_pin
         self.dc = dc_pin
@@ -173,7 +172,23 @@ class SSD1680E290:
 
         # True between starting a refresh and collecting it - see _update().
         self._busy_pending = False
-        self.previous_buffer = bytearray(b"\xFF" * self.buffer_size)
+        # Taken from the caller when offered. The reader claims every screen-sized
+        # buffer before anything else runs, because this heap does not compact and
+        # a 4736-byte block asked for late is the one that fails - see the claim
+        # block at the top of code.py.
+        if previous is not None:
+            self.previous_buffer = previous
+            # Chunked, not a per-byte loop: 4736 iterations of Python is ~5ms
+            # of boot for no reason. Not b"\xFF" * buffer_size either - that
+            # allocates a second screen-sized object, which is the thing this
+            # whole arrangement exists to avoid.
+            _ff = b"\xFF" * 64
+            for _i in range(0, self.buffer_size - 63, 64):
+                self.previous_buffer[_i:_i + 64] = _ff
+            for _i in range((self.buffer_size // 64) * 64, self.buffer_size):
+                self.previous_buffer[_i] = 0xFF
+        else:
+            self.previous_buffer = bytearray(b"\xFF" * self.buffer_size)
         self.asleep = True              # nothing has been initialised yet
         self.partial_lut_loaded = False
         self._init_panel()
@@ -203,13 +218,13 @@ class SSD1680E290:
         self.wait_busy()
 
     def wait_busy(self, timeout=20.0):
-        """Block while BUSY is asserted.
-
-        Note the polarity is the opposite of the E213's panel: the SSD1680
-        drives BUSY *high* while it is working. Getting this backwards does not
-        fail loudly - every wait returns instantly and the refreshes simply come
-        out torn, because data is clocked in while the controller is mid-update.
-        """
+        # Block while BUSY is asserted.
+        #
+        #         Note the polarity is the opposite of the E213's panel: the SSD1680
+        #         drives BUSY *high* while it is working. Getting this backwards does not
+        #         fail loudly - every wait returns instantly and the refreshes simply come
+        #         out torn, because data is clocked in while the controller is mid-update.
+        #
         start = time.monotonic()
         time.sleep(0.002)
         while self.busy.value:
@@ -276,44 +291,44 @@ class SSD1680E290:
             self._init_panel()
 
     def _update(self, mode):
-        """Start a refresh and return. Does NOT wait for it to finish.
-
-        The panel drives itself from its own RAM once activated - the data is
-        already clocked out, and nothing on the SPI bus is needed until the
-        next operation. Blocking here made every refresh cost its full duration
-        even when the caller had work to do: page turns waited ~0.4 s before
-        pre-rendering the next page, and an EPUB conversion stopped dead for
-        half a second on every progress update it drew.
-
-        The wait is deferred instead. _wait_ready() collects it at the top of
-        anything that next touches the panel, so the panel and the CPU overlap
-        and nobody has to remember to poll.
-        """
+        # Start a refresh and return. Does NOT wait for it to finish.
+        #
+        #         The panel drives itself from its own RAM once activated - the data is
+        #         already clocked out, and nothing on the SPI bus is needed until the
+        #         next operation. Blocking here made every refresh cost its full duration
+        #         even when the caller had work to do: page turns waited ~0.4 s before
+        #         pre-rendering the next page, and an EPUB conversion stopped dead for
+        #         half a second on every progress update it drew.
+        #
+        #         The wait is deferred instead. _wait_ready() collects it at the top of
+        #         anything that next touches the panel, so the panel and the CPU overlap
+        #         and nobody has to remember to poll.
+        #
         self.send_command(_UPDATE_CONTROL_2)
         self.send_data(mode)
         self.send_command(_MASTER_ACTIVATE)
         self._busy_pending = True
 
     def set_previous(self, native_buf):
-        """Tell the driver what is on the panel. Buffers here are native.
-
-        Needed after a light sleep, where the driver object is rebuilt from
-        scratch but the panel still holds the page.
-        """
+        # Tell the driver what is on the panel. Buffers here are native.
+        #
+        #         Needed after a light sleep, where the driver object is rebuilt from
+        #         scratch but the panel still holds the page.
+        #
         self.previous_buffer[:] = native_buf
 
     def _wait_ready(self):
-        """Collect a deferred refresh, if one is still running."""
+        # Collect a deferred refresh, if one is still running.
         if self._busy_pending:
             self.wait_busy()
             self._busy_pending = False
 
     def power_down(self):
-        """Put the controller in its ~2 uA deep sleep. Call before sleeping.
-
-        Coming back needs a hardware reset and a fresh init, which _wake() does
-        on the next refresh, so this is safe to call at any point.
-        """
+        # Put the controller in its ~2 uA deep sleep. Call before sleeping.
+        #
+        #         Coming back needs a hardware reset and a fresh init, which _wake() does
+        #         on the next refresh, so this is safe to call at any point.
+        #
         self._wait_ready()
         if self.asleep:
             return
@@ -323,13 +338,13 @@ class SSD1680E290:
         self.asleep = True
 
     def release_bus(self):
-        """Hand the SPI bus back. Call before the program exits or sleeps.
-
-        The lock is taken once in __init__ and held, which is what keeps each
-        refresh cheap. The cost is that exiting while still holding it stops
-        CircuitPython from entering its post-program "press any key to enter the
-        REPL" wait, leaving a serial host unable to reach the board at all.
-        """
+        # Hand the SPI bus back. Call before the program exits or sleeps.
+        #
+        #         The lock is taken once in __init__ and held, which is what keeps each
+        #         refresh cheap. The cost is that exiting while still holding it stops
+        #         CircuitPython from entering its post-program "press any key to enter the
+        #         REPL" wait, leaving a serial host unable to reach the board at all.
+        #
         # The panel would finish on its own without the bus, but the caller is
         # usually about to sleep or exit, and a refresh cut short by the rails
         # going down leaves a half-drawn page on screen.
@@ -341,7 +356,7 @@ class SSD1680E290:
 
     # --- refreshes -------------------------------------------------------
     def display_full(self, new_buffer):
-        """The flashing refresh: every pixel driven, no ghosting left behind."""
+        # The flashing refresh: every pixel driven, no ghosting left behind.
         self._wait_ready()
         self._wake()
 
@@ -363,15 +378,15 @@ class SSD1680E290:
         self.previous_buffer[:] = new_buffer
 
     def display_partial(self, new_buffer):
-        """The fast refresh: only pixels that changed are driven.
-
-        The controller works out which those are by comparing the new image in
-        RAM 0x24 against the old one in RAM 0x26, so the old frame is written
-        out explicitly first. Trusting the controller to still be holding it
-        would break exactly where it matters - after a light sleep the driver
-        object is rebuilt from scratch, and the reader hands the previous frame
-        back through previous_buffer.
-        """
+        # The fast refresh: only pixels that changed are driven.
+        #
+        #         The controller works out which those are by comparing the new image in
+        #         RAM 0x24 against the old one in RAM 0x26, so the old frame is written
+        #         out explicitly first. Trusting the controller to still be holding it
+        #         would break exactly where it matters - after a light sleep the driver
+        #         object is rebuilt from scratch, and the reader hands the previous frame
+        #         back through previous_buffer.
+        #
         self._wait_ready()
         self._wake()
 

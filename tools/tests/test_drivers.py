@@ -64,8 +64,11 @@ def main():
 
     # busy_ready: the level the pin must read for wait_busy() to return.
     # SSD1680 is busy-high; the UC8151-class panel is busy-low.
+    # (module, class, rotation, what BUSY reads when the panel is ready).
+    # The SSD1680 signals busy HIGH; the two UC8151-family panels signal it LOW.
     cases = (("ssd1680e290", "SSD1680E290", 3, False),
-             ("lcmen2r13efc1", "LCMEN2R13EFC1", 1, True))
+             ("lcmen2r13efc1", "LCMEN2R13EFC1", 1, True),
+             ("uc8151badger", "UC8151Badger", 3, True))
     fails = 0
     for modname, clsname, rotation, busy_ready in cases:
         mod = __import__(modname)
@@ -107,7 +110,7 @@ def main():
             print("       WARNING: less than one frame was sent")
             fails += 1
 
-    print("\n%s" % ("both drivers exercise clean" if not fails
+    print("\n%s" % ("%d drivers exercise clean" % len(cases) if not fails
                     else "%d DRIVER PROBLEM(S)" % fails))
     return 1 if fails else 0
 

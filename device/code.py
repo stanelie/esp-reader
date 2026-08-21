@@ -13,11 +13,133 @@
 # pin maps are permutations of the same six lines and the wrong one drives an
 # output into the panel's BUSY output.
 
+import gc
+import os
 import time
 
 t_boot_start = time.monotonic()
 
-import os
+# --- SCARCE MEMORY IS CLAIMED BEFORE ANYTHING ELSE RUNS ---
+# Not "early in the boot" - first. Before the panel tables, before a single
+# function is defined, before the first log line is formatted.
+#
+# The reason is that this heap has no compaction, so what matters is not how
+# much is free but whether any of it is in one piece, and those two numbers
+# diverge violently here. Measured against the Badger reader, which does fit
+# all of this on the same chip: both had ~141KB free at this point, and its
+# largest single region was 63488 bytes against ours at 40416. Identical free
+# memory, 23KB less of it usable. Every string formatted, every function
+# object created and every dict built beforehand is a brick in that wall.
+#
+# The sizes are written out rather than read from the panel profile, because
+# the profile has not been selected yet - that is the point. 4736 covers the
+# largest panel here (296x128); the E213 needs 4000 and is given the same
+# buffer, wasting 736 bytes rather than reordering the boot around it.
+_claim_notes = []
+_BUF_BYTES = 4736
+_SCRATCH_BYTES = 4736
+
+# --- HYPHENATION ---
+# Liang's algorithm, English patterns, in lib/hyphenator.py. Optional: if the
+# module or its pattern blob is missing the reader wraps on whole words exactly
+# as before, so a stripped-down drive still works.
+#
+# Measured on the books here: unhyphenated, the ragged right edge averages 24 px
+# of the 292 px line, 8.3% of the width, with one line in ten ending 50 px short.
+ENABLE_HYPHENATION = True
+
+hyphenate_ok = False
+if ENABLE_HYPHENATION:
+    try:
+        import hyphenator
+        hyphenator._load()   # fail here, on the file, not mid-page
+        hyphenate_ok = True
+        _claim_notes.append("Hyphenation ready (%d bytes of patterns)." % len(hyphenator._BLOB))
+    except Exception as e:
+        _claim_notes.append("Hyphenation unavailable (%s); whole words only." % e)
+
+
+# --- SCREEN BUFFERS ---
+# Before the hyphenation patterns, the font and the panel driver, because
+# CircuitPython's collector does not move objects: whatever is asked for last
+# has to fit a gap left by everything before it. Claimed last instead, on the
+# RP2040 a 4736-byte buffer failed with 115664 bytes free - not a shortage of
+# memory but a shortage of anywhere to put it. The ESP32-S3 boards have enough
+# headroom that they never showed this, which is why it went unnoticed.
+#
+# The sizes come from the panel profile rather than from the driver, which does
+# not exist yet - that is the whole point of allocating here.
+
+# One buffer big enough for the largest font on the drive, reused by every
+# font load. PropFont otherwise does f.read(), which grows a buffer by doubling
+# and copying; by the time the reader is running there is no gap that will take
+# a 5KB font that way, so switching font failed silently - load_reader_font
+# returned False and the caller quietly put the old font back, which looks
+# exactly like the menu doing nothing.
+_font_buf = None
+try:
+    _biggest = 0
+    for _e in os.listdir("/fonts"):
+        if _e.endswith(".pf") and not _e.startswith("."):
+            _sz = os.stat("/fonts/" + _e)[6]
+            if _sz > _biggest:
+                _biggest = _sz
+    if _biggest:
+        _font_buf = bytearray(_biggest)
+except Exception as _e2:
+    _claim_notes.append("No shared font buffer (%s); fonts load individually." % _e2)
+
+_frame_scratch = bytearray(_SCRATCH_BYTES)
+# 64 bytes, not a second screen-sized one. Holding a full 4736-byte blank page
+# purely to blank the canvas with a single slice assignment cost exactly as
+# much as a page buffer, on a board where the page buffers are what run out.
+_FF64 = b"\xFF" * 64
+
+# Three page buffers - current, next, previous - recycled rather than
+# reallocated. A page turn only rotates which is which, so the sole allocation
+# was the newly rendered page, once per turn, for ever. That churn is what
+# fragmented the heap: each new buffer had to find a contiguous 4.7KB slot and
+# left a 4.7KB hole behind when it was dropped.
+_buf_pool = []
+for _i in range(3):
+    try:
+        _buf_pool.append(bytearray(_BUF_BYTES))
+    except MemoryError:
+        # Two is enough to read with; the third only makes going back instant.
+        _claim_notes.append("Only %d page buffers fit; back-navigation will re-render."
+                 % len(_buf_pool))
+        break
+
+
+def _take_buf():
+    # A page buffer from the pool, or a new one if the pool has run dry.
+    # On the RP2040 that fallback will usually raise: by the time the reader is
+    # running there is no 4736-byte gap left, which is the whole reason the
+    # pool exists. Callers that need a buffer while the cache is full should
+    # call release_neighbours() first rather than rely on this.
+    if _buf_pool:
+        return _buf_pool.pop()
+    return bytearray(_BUF_BYTES)
+
+
+# The panel driver needs one screen-sized buffer too, for the frame currently
+# on the glass. Claimed here with the others rather than inside the driver,
+# which runs hundreds of lines later: it was the last 4736 bytes asked for and
+# so the one that failed, with everything else already fitting.
+try:
+    _driver_prev = bytearray(_BUF_BYTES)
+except MemoryError:
+    _driver_prev = None
+    _claim_notes.append("No buffer for the driver's previous frame.")
+
+
+def _give_buf(buf):
+    # Hand a page buffer back. Dropping a reference is not enough - the point
+    #     is to reuse this exact block rather than ask the heap for another.
+    if buf is not None and len(_buf_pool) < 3:
+        _buf_pool.append(buf)
+
+
 import busio
 import digitalio
 import keypad
@@ -27,11 +149,6 @@ import board
 import displayio
 import alarm
 import supervisor
-import adafruit_framebuf
-from fbrotate import rotate
-from propfont import PropFont
-from ssd1680e290 import SSD1680E290
-from bookmarks import Bookmarks
 
 
 # --- PINS COMMON TO BOTH BOARDS ---
@@ -46,16 +163,28 @@ from bookmarks import Bookmarks
 # boards Vext is GPIO18. The E290 board definition drives it high (and marks it
 # never_reset) to power the panel, so the reader must not try to claim it; the
 # E213 panel does not need it at all.
-PIN_KEY_NEXT = microcontroller.pin.GPIO21
-PIN_KEY_BACK = microcontroller.pin.GPIO0     # BOOT button
+# These are filled in from the panel profile once the board is known. They
+# cannot be resolved here: this module has to import on every board before
+# board detection has happened, and microcontroller.pin.GPIO45 does not exist
+# on an RP2040 - referencing it at module level is an AttributeError at import,
+# which is exactly how the Badger first refused to boot.
+PIN_KEY_NEXT = None
+PIN_KEY_BACK = None
+PIN_LED = None
+PIN_ADC_CTRL = None
+PIN_BATTERY = None
 
-# GPIO45 is also an ESP32-S3 strapping pin (VDD_SPI voltage select, sampled at
-# reset). Driving it after boot is what the vendor's own board does, so this is
-# safe, but never add a pull to it.
-PIN_LED = microcontroller.pin.GPIO45
+# True where a button reads low when pressed (Heltec: pull-up to 3V3, button to
+# ground). The Badger wires its buttons the other way - pull-down, button to
+# 3V3 - so every read and every wake alarm inverts with this.
+KEYS_ACTIVE_LOW = True
 
-PIN_ADC_CTRL = microcontroller.pin.GPIO46    # high connects VBAT to the divider
-PIN_BATTERY = microcontroller.pin.GPIO7
+
+def _pin(name):
+    # Resolve a pin by name, or None if this chip has no such pin.
+    if name is None:
+        return None
+    return getattr(microcontroller.pin, name)
 
 
 # Auto-reload is disabled in boot.py - see the reasoning there. Consequence:
@@ -70,13 +199,17 @@ def log_step(msg):
 # Diagnostics over the external FTDI adapter on GPIO44. The native USB console
 # dies the moment the reader light-sleeps, so anything interesting about sleep
 # or USB mode is invisible there. Costs nothing when no adapter is attached.
+# Resolved by name for the same reason the panel pins are: these two exist on
+# the ESP32-S3 and not on an RP2040, and a bare attribute here is an
+# AttributeError at import on any board that lacks them. Where they are absent
+# uart_log() is a no-op and the USB console is the only channel.
 ENABLE_UART_LOG = True
-LOG_UART_TX = microcontroller.pin.GPIO44
-LOG_UART_RX = microcontroller.pin.GPIO43
+LOG_UART_TX = getattr(microcontroller.pin, "GPIO44", None)
+LOG_UART_RX = getattr(microcontroller.pin, "GPIO43", None)
 
 
 def uart_log(msg):
-    if not ENABLE_UART_LOG:
+    if not ENABLE_UART_LOG or LOG_UART_TX is None:
         return
     u = None
     try:
@@ -113,13 +246,21 @@ def uart_log(msg):
 PANELS = {
     "e213": {
         "driver": "lcmen2r13efc1",
-        "sck": microcontroller.pin.GPIO4,
-        "mosi": microcontroller.pin.GPIO6,
-        "cs": microcontroller.pin.GPIO5,
-        "dc": microcontroller.pin.GPIO2,
-        "rst": microcontroller.pin.GPIO3,
-        "busy": microcontroller.pin.GPIO1,
+        "sck": "GPIO4",
+        "mosi": "GPIO6",
+        "cs": "GPIO5",
+        "dc": "GPIO2",
+        "rst": "GPIO3",
+        "busy": "GPIO1",
         "rotation": 1,
+        "key_next": "GPIO21",
+        "key_back": "GPIO0",          # BOOT button
+        # GPIO45 is also an ESP32-S3 strapping pin (VDD_SPI voltage select,
+        # sampled at reset). Driving it after boot is what the vendor's own
+        # board does, so this is safe, but never add a pull to it.
+        "led": "GPIO45",
+        "adc_ctrl": "GPIO46",         # high connects VBAT to the divider
+        "battery": "GPIO7",
         # Layout is expressed relative to whatever font is loaded, because the
         # font is selectable and its metrics move with it:
         #
@@ -131,20 +272,77 @@ PANELS = {
         # PCF-based derivation had to measure ink extents and cap heights.
         "leading": 1,
         "page_margin": 0,
+        # Native 122x250 at 16 bytes/row; landscape 250x122 at 32.
+        "buf_bytes": 16 * 250,
+        "scratch_bytes": 32 * 122,
         # These three are collinear to 0.3%, so interpolating between them and
         # fitting a line through them agree to well under a millivolt. Kept as
         # points anyway, so both boards use one mechanism.
         "cal_points": ((13370.3, 3.40), (14480.6, 3.70), (16336.1, 4.20)),
     },
+    # Pimoroni Badger 2040 (RP2040). The panel is a UC8151, which is the same
+    # controller family as the E213's - identical command set, different size
+    # and waveforms - so it reuses that driver's structure rather than the
+    # SSD1680's. Pin numbers read off board.INKY_* on the device itself.
+    "badger2040": {
+        "driver": "uc8151badger",
+        "sck": "GPIO18",
+        "mosi": "GPIO19",
+        "cs": "GPIO17",
+        "dc": "GPIO20",
+        "rst": "GPIO21",
+        "busy": "GPIO26",
+        "rotation": 3,
+        # SW_UP / SW_DOWN rather than the A/B/C row: they sit on the right
+        # edge where a thumb rests, and the other three are unused - this
+        # reader has never had more than two buttons to be worth binding.
+        "key_next": "GPIO11",         # SW_DOWN
+        "key_back": "GPIO15",         # SW_UP
+        # The Badger pulls its buttons DOWN and switches them to 3V3, the
+        # opposite of the Heltec boards.
+        "keys_active_low": False,
+        # Arm ONE wake alarm, not two. Measured on this board: with alarms on
+        # both buttons, light sleep returns instantly over and over - 21 such
+        # phantom wakes in a three-press session - and each one tears down the
+        # display and the keypad, so a press landing in that window is lost.
+        # A single alarm slept the full deadline in isolation. The cost is that
+        # BACK cannot wake the reader; it still works while awake.
+        "single_wake_alarm": True,
+        "led": "GPIO25",              # USER_LED
+        # VBAT_SENSE reads the cell through a divider that is always connected,
+        # so there is no enable line to raise first.
+        "adc_ctrl": None,
+        "battery": "GPIO29",          # VBAT_SENSE
+        # Zero, like the E290: same 128px panel, and the glyph box already carries
+        # the room a line needs. A leading of 1 pushed the pitch to 15 and cost
+        # the ninth line - the default font's ink is exactly 14 rows tall, so 14
+        # is both the tightest safe pitch and the one that fits nine.
+        "leading": 0,
+        "page_margin": 0,
+        "buf_bytes": 16 * 296,
+        "scratch_bytes": 37 * 128,
+        # UNCALIBRATED. Placeholder scaled from the Badger's 3x divider against
+        # the E213's numbers; it will read approximately, not accurately. Run
+        # tools/battery_calibrate.py on this board and replace these.
+        "cal_points": ((13370.3, 3.40), (14480.6, 3.70), (16336.1, 4.20)),
+    },
     "e290": {
         "driver": "ssd1680e290",
-        "sck": microcontroller.pin.GPIO2,
-        "mosi": microcontroller.pin.GPIO1,
-        "cs": microcontroller.pin.GPIO3,
-        "dc": microcontroller.pin.GPIO4,
-        "rst": microcontroller.pin.GPIO5,
-        "busy": microcontroller.pin.GPIO6,
+        "sck": "GPIO2",
+        "mosi": "GPIO1",
+        "cs": "GPIO3",
+        "dc": "GPIO4",
+        "rst": "GPIO5",
+        "busy": "GPIO6",
         "rotation": 3,
+        "key_next": "GPIO21",
+        "key_back": "GPIO0",          # BOOT button
+        # GPIO45 is also an ESP32-S3 strapping pin (VDD_SPI voltage select,
+        # sampled at reset). Driving it after boot is what the vendor's own
+        # board does, so this is safe, but never add a pull to it.
+        "led": "GPIO45",
+        "adc_ctrl": "GPIO46",         # high connects VBAT to the divider
+        "battery": "GPIO7",
         # See the E213 entry for what these mean. One row tighter than the
         # E213 on both counts, which is what fits a 9th line of Literata 12 on
         # a panel only six rows taller, and what puts a capital on row 1 rather
@@ -157,6 +355,9 @@ PANELS = {
         # default font on a panel only six rows taller.
         "leading": 0,
         "page_margin": 0,
+        # Native 128x296 at 16 bytes/row; landscape 296x128 at 37. Both 4736.
+        "buf_bytes": 16 * 296,
+        "scratch_bytes": 37 * 128,
         # Measured on THIS unit, 2026-08-20. PPK2 into the battery input,
         # USB disconnected, three readings per voltage, each the median of 128
         # samples. The three medians at each voltage came back identical to the
@@ -204,6 +405,10 @@ BOARDS = {
     "heltec_vision_master_e213": ("e213", True),
     "heltec_vision_master_e290_lightsleep": ("e290", True),
     "heltec_vision_master_e290": ("e290", False),
+    # RP2040. The third field is about ESP32 light sleep, which this chip does
+    # not have at all, so it is False and the reader drops to deep sleep.
+    "pimoroni_badger2040_stan": ("badger2040", False),
+    "pimoroni_badger2040": ("badger2040", False),
 }
 
 # Set to a key of BOARDS to force the choice. Needed only on a generic
@@ -213,14 +418,16 @@ BOARD_OVERRIDE = None
 
 
 def _halt(msg):
-    """Refuse to run, as loudly as the hardware still allows.
-
-    Nothing can be put on the panel here - not knowing which panel it is is the
-    whole problem - so the report goes to the two channels that work without
-    one: the UART, and the LED, which is GPIO45 on both boards.
-    """
+    # Refuse to run, as loudly as the hardware still allows.
+    #
+    #     Nothing can be put on the panel here - not knowing which panel it is is the
+    #     whole problem - so the report goes to the two channels that work without
+    #     one: the UART, and the LED, which is GPIO45 on both boards.
+    #
     log_step(msg)
     try:
+        if PIN_LED is None:
+            raise RuntimeError("no LED pin yet")
         sos = digitalio.DigitalInOut(PIN_LED)
         sos.direction = digitalio.Direction.OUTPUT
         for _ in range(20):
@@ -233,7 +440,7 @@ def _halt(msg):
 
 
 def _select_board():
-    """(key, panel name, real light sleep) for the board we are running on."""
+    # (key, panel name, real light sleep) for the board we are running on.
     key = BOARD_OVERRIDE
     source = "BOARD_OVERRIDE"
     if key is None:
@@ -254,11 +461,91 @@ BOARD_KEY, PANEL_KEY, REAL_LIGHT_SLEEP = _select_board()
 PANEL = PANELS[PANEL_KEY]
 CANVAS_ROTATION = PANEL["rotation"]
 
+# Names become pins only now, when we know the chip they have to exist on.
+for _k in ("sck", "mosi", "cs", "dc", "rst", "busy"):
+    PANEL[_k] = _pin(PANEL[_k])
+PIN_KEY_NEXT = _pin(PANEL["key_next"])
+PIN_KEY_BACK = _pin(PANEL["key_back"])
+PIN_LED = _pin(PANEL.get("led"))
+PIN_ADC_CTRL = _pin(PANEL.get("adc_ctrl"))
+PIN_BATTERY = _pin(PANEL.get("battery"))
+KEYS_ACTIVE_LOW = PANEL.get("keys_active_low", True)
+# Everything that reads a button or arms a wake alarm goes through these two,
+# so a board that wires its buttons the other way needs no other change.
+KEY_PULL = digitalio.Pull.UP if KEYS_ACTIVE_LOW else digitalio.Pull.DOWN
+# Returned by enter_light_sleep() for a wake that was neither a button nor the
+# deadline. Distinct from None, which means "the deadline elapsed, go to deep
+# sleep", and from a key, which means "act on this press".
+KEY_IGNORE = -1
+
+# --- COUNTERS THAT SURVIVE BEING UNPLUGGED ---
+# The bugs worth chasing on this reader happen with USB out: sleep, wake and
+# power. print() goes to the USB console and is discarded when nothing is
+# listening, which is how a whole session's evidence was lost once already.
+#
+# alarm.sleep_memory is the right store: it survives light AND deep sleep, and
+# unlike microcontroller.nvm it is RAM, so counting into it costs no flash
+# wear. The filesystem is not an option - it is read-only to the device
+# whenever the USB drive is enabled. Cleared by a power cycle, which is the
+# one thing that also clears what we would be measuring.
+#
+#   0 unattributed wakes       1 page turns    2 unattributed, button down
+#   3 wakes the alarm named     4 awake-path taps
+_SM = getattr(alarm, "sleep_memory", None)
+
+
+def diag_bump(i):
+    if _SM is None or (i * 2 + 2) > len(_SM):
+        return
+    v = ((_SM[i * 2] | (_SM[i * 2 + 1] << 8)) + 1) & 0xFFFF
+    _SM[i * 2] = v & 0xFF
+    _SM[i * 2 + 1] = v >> 8
+
+
+def diag_read(i):
+    if _SM is None or (i * 2 + 2) > len(_SM):
+        return -1
+    return _SM[i * 2] | (_SM[i * 2 + 1] << 8)
+KEY_DOWN = not KEYS_ACTIVE_LOW          # the pin value that means "pressed"
+
+
+def key_is_down(io):
+    return io.value == KEY_DOWN
+
+# --- EVERYTHING SCARCE IS CLAIMED HERE ---
+# As early as the board being known allows, and in descending order of size:
+# the 31KB pattern blob, then the page buffers. Not merely "before the driver"
+# - before the couple of hundred function definitions below, too. Each def
+# allocates a small object, and a few hundred of them scattered through the
+# heap is what leaves 108000 bytes free with no 32KB hole anywhere in it. The
+# Badger reader claims its buffers on line 113 of a 1900-line file for exactly
+# this reason; ours were doing it on line 609 and failing.
+# Imported HERE, after the scarce allocations above and not at the top of the
+# file. Importing a module allocates its code objects out of the same large
+# free region the buffers and the pattern blob have to come from, and it is a
+# region, not a total: measured, the reader had 141296 bytes free but its
+# biggest single piece was 40416, and these four imports were taking a chunk
+# out of it before anything that needs contiguity got a chance.
+#
+# Nothing above this line uses them - they are wanted by the render path and
+# the picker, which run much later.
+import adafruit_framebuf
+from fbrotate import rotate
+from propfont import PropFont
+from bookmarks import Bookmarks
+
 if PANEL["driver"] == "ssd1680e290":
     from ssd1680e290 import SSD1680E290 as PanelDriver
+elif PANEL["driver"] == "uc8151badger":
+    from uc8151badger import UC8151Badger as PanelDriver
 else:
     from lcmen2r13efc1 import LCMEN2R13EFC1 as PanelDriver
 
+for _n in _claim_notes:
+    log_step(_n)
+log_step("diag: turns %d | wakes: alarm %d, unattributed %d (button down %d)"
+         " | awake taps %d"
+         % (diag_read(1), diag_read(3), diag_read(0), diag_read(2), diag_read(4)))
 log_step("Board %s: %s panel, real light sleep %s"
          % (BOARD_KEY, PANEL_KEY, REAL_LIGHT_SLEEP))
 
@@ -273,17 +560,17 @@ displayio.release_displays()
 
 
 def usb_attached():
-    """True when a host has enumerated us over USB.
-
-    Only meaningful while the USB peripheral is alive. After a light sleep it
-    is powered down and this reads False even with the cable in - measured, and
-    the reason USB mode has to be an explicit menu action rather than something
-    detected. The battery divider cannot substitute: it reads the supply node,
-    which a charger or a full cell holds at ~4 V regardless of the cable.
-
-    Deep sleeping while plugged in drops into CircuitPython's *fake* deep
-    sleep: the drive stays mounted but the VM halts and the console goes dead.
-    """
+    # True when a host has enumerated us over USB.
+    #
+    #     Only meaningful while the USB peripheral is alive. After a light sleep it
+    #     is powered down and this reads False even with the cable in - measured, and
+    #     the reason USB mode has to be an explicit menu action rather than something
+    #     detected. The battery divider cannot substitute: it reads the supply node,
+    #     which a charger or a full cell holds at ~4 V regardless of the cable.
+    #
+    #     Deep sleeping while plugged in drops into CircuitPython's *fake* deep
+    #     sleep: the drive stays mounted but the VM halts and the console goes dead.
+    #
     try:
         return bool(supervisor.runtime.usb_connected)
     except AttributeError:
@@ -451,11 +738,12 @@ def build_display():
         baudrate=SPI_BAUDRATE,
         keep_powered=KEEP_DISPLAY_POWERED,
         rotation=CANVAS_ROTATION,
+        previous=_driver_prev,
     )
 
 
 def teardown_display():
-    """Drop the panel rails and hand back every pin and the bus."""
+    # Drop the panel rails and hand back every pin and the bus.
     global spi, cs, dc, rst, busy, epd
     try:
         if epd is not None:
@@ -477,6 +765,15 @@ def teardown_display():
     spi = cs = dc = rst = busy = epd = None
 
 
+# Everything below is claimed BEFORE build_display(), the font and the panel
+# driver, in descending order of size. The collector does not move objects, so
+# a late allocation has to fit a gap left by every earlier one. Claimed after
+# the driver instead - which is where these blocks used to sit, despite what
+# the comment above them said - the 31KB pattern blob had 102816 bytes free and
+# no gap over 4096 to put them in.
+#
+# The order is the one the Badger reader arrived at the hard way: page buffers,
+# then hyphenation patterns, then the font, then the driver last of all.
 build_display()
 
 # --- PAGE GEOMETRY ---
@@ -492,6 +789,17 @@ WIDTH, HEIGHT = epd.landscape_width, epd.landscape_height
 
 PADDING_X = 2
 MAX_LINE_WIDTH_PX = WIDTH - (PADDING_X * 2)
+
+# Space kept clear at the right of the FIRST line for the battery/USB readout.
+# Reserved during wrapping rather than checked at draw time: the old code drew
+# the indicator only if that corner happened to be blank, and justification
+# guarantees it never is - a justified line ends exactly at the right margin by
+# definition, so the indicator was unreachable on any full page.
+#
+# Because it changes where line one wraps, it has to be applied while
+# paginating as well as while drawing. Page offsets come out of the wrap, so a
+# reservation known only to the renderer would put the two out of step.
+STATUS_RESERVE_PX = 30
 
 # PAGE_TOP and LINE_HEIGHT are not here any more - they depend on the font,
 # which is selectable, so load_reader_font() derives them further down.
@@ -515,7 +823,7 @@ FONT_DEFAULT = "literata"           # picked when nothing is stored in NVM
 
 
 def list_fonts():
-    """[(path, name)] for the fonts on the drive, PCF preferred, sorted."""
+    # [(path, name)] for the fonts on the drive, PCF preferred, sorted.
     seen = {}
     try:
         entries = os.listdir(FONT_DIR)
@@ -531,7 +839,7 @@ def list_fonts():
 
 
 def font_label(stem):
-    """A font's file stem as something worth showing: literata-large -> Literata Large."""
+    # A font's file stem as something worth showing: literata-large -> Literata Large.
     out = []
     for part in stem.split("-"):
         if not part:
@@ -562,7 +870,7 @@ FONT_SUBS = (
 
 
 def to_font(text):
-    """Fold a string into the range the font actually has glyphs for."""
+    # Fold a string into the range the font actually has glyphs for.
     for src, dst in FONT_SUBS:
         if src in text:
             text = text.replace(src, dst)
@@ -578,17 +886,29 @@ MAX_LINES_PER_PAGE = (HEIGHT - 2) // LINE_HEIGHT
 PICKER_ROWS = MAX_LINES_PER_PAGE - 1
 SPACE_WIDTH = 6
 
+# Loaded HERE, before the panel buffers and the font, and not where it is used.
+# The pattern blob has to land in one piece, and on the RP2040 it will not:
+# measured at the old position there were 115664 bytes free but no contiguous
+# block above 32 KB for a 27 KB allocation, so hyphenation silently switched
+# itself off on the Badger while claiming a memory shortage that did not exist.
+# At this point in the boot the largest block is still ~180 KB.
 # --- BATTERY & USB SETUP ---
 adc_ctrl = None
 vbus_sense = None   # optional; the E290 has no dedicated VBUS GPIO either
 
-try:
-    adc_ctrl = digitalio.DigitalInOut(PIN_ADC_CTRL)
-    adc_ctrl.direction = digitalio.Direction.OUTPUT
-    adc_ctrl.value = False          # start disabled (saves power)
-    log_step("Battery ADC_CTRL (GPIO46) initialized.")
-except Exception as e:
-    print(f"Battery ADC_CTRL setup failed: {e}")
+# Not every board gates its divider. Where adc_ctrl is None the divider is
+# wired permanently across the cell (the Badger), so there is nothing to raise
+# before a reading and nothing to drop after one.
+if PIN_ADC_CTRL is None:
+    log_step("No battery ADC enable line on this board; divider is always on.")
+else:
+    try:
+        adc_ctrl = digitalio.DigitalInOut(PIN_ADC_CTRL)
+        adc_ctrl.direction = digitalio.Direction.OUTPUT
+        adc_ctrl.value = False          # start disabled (saves power)
+        log_step("Battery ADC_CTRL initialized.")
+    except Exception as e:
+        print(f"Battery ADC_CTRL setup failed: {e}")
 
 # Battery ADC calibration.
 #
@@ -616,17 +936,17 @@ CAL_POINTS = PANEL["cal_points"]     # ((raw, volts), ...), ascending by raw
 
 
 def raw_to_volts(raw):
-    """Volts for a raw ADC count, interpolating between measured points.
-
-    A straight line was the obvious thing and it does not survive the E290's
-    measurements - see the profile above. Interpolation costs a couple of
-    comparisons per reading, once every BATTERY_CACHE_SECONDS, and has the
-    property a fitted line lacks here: it is exactly right at every voltage
-    that was actually measured.
-
-    Outside the measured range it extends the nearest segment, so a reading
-    just past either end degrades smoothly rather than stepping.
-    """
+    # Volts for a raw ADC count, interpolating between measured points.
+    #
+    #     A straight line was the obvious thing and it does not survive the E290's
+    #     measurements - see the profile above. Interpolation costs a couple of
+    #     comparisons per reading, once every BATTERY_CACHE_SECONDS, and has the
+    #     property a fitted line lacks here: it is exactly right at every voltage
+    #     that was actually measured.
+    #
+    #     Outside the measured range it extends the nearest segment, so a reading
+    #     just past either end degrades smoothly rather than stepping.
+    #
     pts = CAL_POINTS
     if raw <= pts[0][0]:
         (r0, v0), (r1, v1) = pts[0], pts[1]
@@ -645,14 +965,19 @@ _batt_read_time = None
 
 
 def get_battery_status(force=False):
-    """Battery percentage / USB state, cached for BATTERY_CACHE_SECONDS."""
+    # Battery percentage / USB state, cached for BATTERY_CACHE_SECONDS.
     global adc_ctrl, vbus_sense, _batt_pct, _batt_charging, _batt_read_time
 
     if not force and _batt_read_time is not None:
         if time.monotonic() - _batt_read_time < BATTERY_CACHE_SECONDS:
             return _batt_pct, _batt_charging
 
-    if not adc_ctrl:
+    # Keyed on the ADC pin, not on the enable line. Not every board has an
+    # enable line: the Badger's divider is wired permanently across the cell,
+    # so adc_ctrl is None there and the old test bailed out before reading
+    # anything - which took the USB indicator with it, since that is decided
+    # further down.
+    if PIN_BATTERY is None:
         _batt_pct, _batt_charging, _batt_read_time = -1, False, time.monotonic()
         return _batt_pct, _batt_charging
 
@@ -665,8 +990,9 @@ def get_battery_status(force=False):
         is_charging = is_charging or vbus_sense.value
 
     try:
-        adc_ctrl.value = True
-        time.sleep(0.015)
+        if adc_ctrl is not None:
+            adc_ctrl.value = True
+            time.sleep(0.015)      # let the divider settle after switching on
 
         adc = analogio.AnalogIn(PIN_BATTERY)
         vals = []
@@ -674,7 +1000,8 @@ def get_battery_status(force=False):
             vals.append(adc.value)
         adc.deinit()
 
-        adc_ctrl.value = False
+        if adc_ctrl is not None:
+            adc_ctrl.value = False
 
         # Median, not mean, and this is not fussiness. Measured on the E290:
         # individual samples intermittently rail to 62297 of 65535 - about
@@ -729,7 +1056,7 @@ def get_string_width(text):
 
 
 def draw_text(canvas, text, x, y, color=0):
-    """Draw at (x, y) = the top-left of the glyph box."""
+    # Draw at (x, y) = the top-left of the glyph box.
     if reader_font is None:
         canvas.text(text, x, y, color)
         return
@@ -737,12 +1064,12 @@ def draw_text(canvas, text, x, y, color=0):
 
 
 def draw_text_justified(canvas, text, x, y, target_px, color=0):
-    """Draw `text` spread to exactly target_px by widening its spaces.
-
-    PropFont does the spreading: it hands the leftover pixels out one per space
-    from the left, so the line ends exactly on the margin rather than a
-    rounding error short of it.
-    """
+    # Draw `text` spread to exactly target_px by widening its spaces.
+    #
+    #     PropFont does the spreading: it hands the leftover pixels out one per space
+    #     from the left, so the line ends exactly on the margin rather than a
+    #     rounding error short of it.
+    #
     if reader_font is None:
         canvas.text(text, x, y, color)
         return
@@ -764,11 +1091,11 @@ _FONT_NVM_MAGIC = 0x5B
 
 
 def load_font_choice(count):
-    """Stored font index, or None if nothing valid is stored.
-
-    None rather than 0, so "never chosen" can fall back to FONT_DEFAULT
-    instead of silently meaning "chose the first one".
-    """
+    # Stored font index, or None if nothing valid is stored.
+    #
+    #     None rather than 0, so "never chosen" can fall back to FONT_DEFAULT
+    #     instead of silently meaning "chose the first one".
+    #
     try:
         nvm = microcontroller.nvm
         if nvm is None or len(nvm) < _FONT_NVM_OFFSET + 2:
@@ -782,8 +1109,8 @@ def load_font_choice(count):
 
 
 def save_font_choice(idx):
-    """Remember the font. One NVM write, and only when it changed - see the
-    note above SAVE_EVERY_N_TURNS for why that matters."""
+    # Remember the font. One NVM write, and only when it changed - see the
+    #     note above SAVE_EVERY_N_TURNS for why that matters.
     try:
         nvm = microcontroller.nvm
         if nvm is None or len(nvm) < _FONT_NVM_OFFSET + 2:
@@ -797,21 +1124,21 @@ def save_font_choice(idx):
 
 
 def load_reader_font(path):
-    """Load a font and derive the page layout from it. True on success.
-
-    The panel profile says only how tight to be; the numbers come from the
-    font, which is what makes the font selectable - a 13px serif and an 18px
-    one cannot share a hand-tuned line height.
-
-    On failure the previous font is left in place, so a bad file in /fonts
-    cannot leave the reader with nothing to draw with.
-    """
+    # Load a font and derive the page layout from it. True on success.
+    #
+    #     The panel profile says only how tight to be; the numbers come from the
+    #     font, which is what makes the font selectable - a 13px serif and an 18px
+    #     one cannot share a hand-tuned line height.
+    #
+    #     On failure the previous font is left in place, so a bad file in /fonts
+    #     cannot leave the reader with nothing to draw with.
+    #
     global reader_font, font_path, LINE_HEIGHT, PAGE_TOP
     global MAX_LINES_PER_PAGE, PICKER_ROWS, SPACE_WIDTH
 
     t0 = time.monotonic()
     try:
-        font = PropFont(path)
+        font = PropFont(path, buf=_font_buf)
     except Exception as e:
         log_step("Font %s did not load (%s)" % (path, e))
         return False
@@ -823,7 +1150,13 @@ def load_reader_font(path):
     # between lines.
     LINE_HEIGHT = font.box_h + PANEL["leading"]
     PAGE_TOP = PANEL["page_margin"]
-    MAX_LINES_PER_PAGE = (HEIGHT - 2) // LINE_HEIGHT
+    # How many lines actually fit, rather than a guess with a 2px fudge.
+    # A line occupies PAGE_TOP + i*LINE_HEIGHT .. + box_h, so the last one
+    # fits when PAGE_TOP + (n-1)*LINE_HEIGHT + box_h <= HEIGHT. The old form
+    # lost a whole line whenever the panel divided evenly by the pitch - the
+    # 8x16 VGA face on a 128px panel is exactly that case, and showed as a
+    # blank strip along the bottom.
+    MAX_LINES_PER_PAGE = (HEIGHT - PAGE_TOP - font.box_h) // LINE_HEIGHT + 1
     PICKER_ROWS = MAX_LINES_PER_PAGE - 1      # one row goes to the header
     SPACE_WIDTH = font.text_width(" ")
 
@@ -854,12 +1187,12 @@ elif not load_reader_font(FONTS[_font_index][0]):
 
 # --- BOOK LIBRARY ---
 def list_epubs():
-    """Every .epub that has no converted .txt yet, as paths, sorted.
-
-    One that has already been converted is not offered again - its .txt is in
-    the list instead, and converting a second time would only overwrite it and
-    lose the reading position stored against that name.
-    """
+    # Every .epub that has no converted .txt yet, as paths, sorted.
+    #
+    #     One that has already been converted is not offered again - its .txt is in
+    #     the list instead, and converting a second time would only overwrite it and
+    #     lose the reading position stored against that name.
+    #
     if not ENABLE_EPUB:
         return []
     found = []
@@ -885,14 +1218,14 @@ def list_epubs():
 
 
 def epub_txt_path(epub_path):
-    """Where a converted .epub lands: /books/<name>.txt, per epub_xtract."""
+    # Where a converted .epub lands: /books/<name>.txt, per epub_xtract.
     name = epub_path.rsplit("/", 1)[-1]
     base = name[:-5] if name.lower().endswith(".epub") else name
     return "books/%s.txt" % base
 
 
 def list_books():
-    """Every .txt in the root and /books, as paths, sorted."""
+    # Every .txt in the root and /books, as paths, sorted.
     found = []
     for folder in BOOK_DIRS:
         try:
@@ -916,7 +1249,7 @@ def list_books():
 
 
 def book_title(path):
-    """What the picker shows: no folder, no extension."""
+    # What the picker shows: no folder, no extension.
     name = path.rsplit("/", 1)[-1]
     lower = name.lower()
     if lower.endswith(".txt"):
@@ -927,7 +1260,7 @@ def book_title(path):
 
 
 def fit_text(text, max_px):
-    """Trim text to max_px, ending in an ellipsis when it had to be cut."""
+    # Trim text to max_px, ending in an ellipsis when it had to be cut.
     if get_string_width(text) <= max_px:
         return text
     ell = "…"
@@ -966,12 +1299,12 @@ keys = None
 
 
 def build_keys():
-    """keypad holds GPIO21/GPIO0, which the wake PinAlarms need, so it is
-    released before sleeping and rebuilt afterwards."""
+    # keypad holds GPIO21/GPIO0, which the wake PinAlarms need, so it is
+    #     released before sleeping and rebuilt afterwards.
     global keys
     keys = keypad.Keys(
         (PIN_KEY_NEXT, PIN_KEY_BACK),
-        value_when_pressed=False,
+        value_when_pressed=KEY_DOWN,
         pull=True,
     )
 
@@ -995,17 +1328,17 @@ _stashed_press = None
 
 
 def ticks_ms_diff(later, earlier):
-    """Wrap-safe difference between two supervisor.ticks_ms() values, in ms.
-
-    ticks_ms() wraps at 2**29. A plain subtraction goes hugely negative across
-    that boundary, which would make a long hold look instant or a double tap
-    look stale, roughly every six days of uptime.
-    """
+    # Wrap-safe difference between two supervisor.ticks_ms() values, in ms.
+    #
+    #     ticks_ms() wraps at 2**29. A plain subtraction goes hugely negative across
+    #     that boundary, which would make a long hold look instant or a double tap
+    #     look stale, roughly every six days of uptime.
+    #
     return ((later - earlier + _TICKS_HALF) % _TICKS_PERIOD) - _TICKS_HALF
 
 
 def next_press():
-    """The next queued press event, or None. Releases are discarded."""
+    # The next queued press event, or None. Releases are discarded.
     global _stashed_press
     if _stashed_press is not None:
         event, _stashed_press = _stashed_press, None
@@ -1019,7 +1352,7 @@ def next_press():
 
 
 def drain_events():
-    """Forget anything queued, so a stale tap cannot act later."""
+    # Forget anything queued, so a stale tap cannot act later.
     global _stashed_press
     _stashed_press = None
     while keys.events.get() is not None:
@@ -1027,12 +1360,12 @@ def drain_events():
 
 
 def classify_hold(key_number, press_ticks):
-    """Wait out a press. Returns (kind, release_ticks).
-
-    kind is "tap", "picker" or "sleep": one button, escalating hold, with the
-    LED as the cue. It lights once holding longer would open the picker, and
-    goes out again once holding longer still would sleep instead.
-    """
+    # Wait out a press. Returns (kind, release_ticks).
+    #
+    #     kind is "tap", "picker" or "sleep": one button, escalating hold, with the
+    #     LED as the cue. It lights once holding longer would open the picker, and
+    #     goes out again once holding longer still would sleep instead.
+    #
     # stage drives only the LED: 0 = nothing yet, 1 = picker armed (LED on),
     # 2 = sleep armed (LED off again). The returned kind is computed from the
     # measured press-to-release time, so it does not depend on poll timing.
@@ -1071,14 +1404,14 @@ def classify_hold(key_number, press_ticks):
 
 
 def was_double_tap(release_ticks):
-    """Whether the tap that just acted was really the first half of a double.
-
-    Call this *after* doing the tap's work. That display refresh takes ~0.5 s,
-    which is longer than DOUBLE_TAP_MS, so the second press is already sitting
-    in the queue and a forward page turn pays nothing at all for the gesture.
-    A press that arrives too late to pair is stashed, and acts on its own on the
-    next pass rather than being swallowed.
-    """
+    # Whether the tap that just acted was really the first half of a double.
+    #
+    #     Call this *after* doing the tap's work. That display refresh takes ~0.5 s,
+    #     which is longer than DOUBLE_TAP_MS, so the second press is already sitting
+    #     in the queue and a forward page turn pays nothing at all for the gesture.
+    #     A press that arrives too late to pair is stashed, and acts on its own on the
+    #     next pass rather than being swallowed.
+    #
     global _stashed_press
     event = next_press()
     if event is None:
@@ -1094,13 +1427,13 @@ _turns_since_save = 0
 
 
 def save_position(force=False):
-    """Store the reading position, at most every SAVE_EVERY_N_TURNS turns.
-
-    force=True for the moments where losing the position would actually cost
-    something: deep sleep, switching books, jumping. Ordinary page turns ride
-    the counter. Bookmarks.save() is itself a no-op when the offset has not
-    changed, so a forced save straight after a throttled one is free.
-    """
+    # Store the reading position, at most every SAVE_EVERY_N_TURNS turns.
+    #
+    #     force=True for the moments where losing the position would actually cost
+    #     something: deep sleep, switching books, jumping. Ordinary page turns ride
+    #     the counter. Bookmarks.save() is itself a no-op when the offset has not
+    #     changed, so a forced save straight after a throttled one is free.
+    #
     global _turns_since_save
     _turns_since_save += 1
     if force or _turns_since_save >= SAVE_EVERY_N_TURNS:
@@ -1145,38 +1478,18 @@ else:
 
 page_offsets = [initial_offset]
 
-# --- HYPHENATION ---
-# Liang's algorithm, English patterns, in lib/hyphenator.py. Optional: if the
-# module or its pattern blob is missing the reader wraps on whole words exactly
-# as before, so a stripped-down drive still works.
-#
-# Measured on the books here: unhyphenated, the ragged right edge averages 24 px
-# of the 292 px line, 8.3% of the width, with one line in ten ending 50 px short.
-ENABLE_HYPHENATION = True
-
-hyphenate_ok = False
-if ENABLE_HYPHENATION:
-    try:
-        import hyphenator
-        hyphenator._load()   # fail here, on the file, not mid-page
-        hyphenate_ok = True
-        log_step("Hyphenation ready (%d bytes of patterns)." % len(hyphenator._BLOB))
-    except Exception as e:
-        log_step("Hyphenation unavailable (%s); wrapping on whole words." % e)
-
-
 def _hyphenate_word(word, space_left):
-    """(head, rest) for a word to be split across two lines, or (None, None).
-
-    head carries the trailing hyphen. The hyphenator deals only in letters, so
-    surrounding punctuation is peeled off and put back - a closing quote should
-    not be what stops "responsibility," from breaking.
-
-    Whatever the stripping does, head + rest reconstructs the word plus exactly
-    one hyphen. That is the property the pagination depends on, and it holds
-    even where the peeling is too eager, because the peeled pieces are simply
-    carried through rather than re-derived.
-    """
+    # (head, rest) for a word to be split across two lines, or (None, None).
+    #
+    #     head carries the trailing hyphen. The hyphenator deals only in letters, so
+    #     surrounding punctuation is peeled off and put back - a closing quote should
+    #     not be what stops "responsibility," from breaking.
+    #
+    #     Whatever the stripping does, head + rest reconstructs the word plus exactly
+    #     one hyphen. That is the property the pagination depends on, and it holds
+    #     even where the peeling is too eager, because the peeled pieces are simply
+    #     carried through rather than re-derived.
+    #
     lead = 0
     while lead < len(word) and not word[lead].isalpha():
         lead += 1
@@ -1199,20 +1512,20 @@ def _hyphenate_word(word, space_left):
 
 
 def read_page_stream(filename, start_offset):
-    """(lines, wrapped, next_offset) for one page starting at a byte offset.
-
-    `wrapped[i]` is True when line i ended because it ran out of room, and False
-    when it ended because the paragraph did. Only the first kind may be
-    justified: stretching a paragraph's last line across the page is what makes
-    justification look broken.
-
-    The distinction has to be made here, while wrapping, because it cannot be
-    recovered afterwards. A blank line following would suggest it, and that
-    works for a file with one line per paragraph - but a hard-wrapped file, of
-    the sort Project Gutenberg ships, has a non-blank line after almost every
-    line, and the short remainder of each source line would be stretched to
-    full width.
-    """
+    # (lines, wrapped, next_offset) for one page starting at a byte offset.
+    #
+    #     `wrapped[i]` is True when line i ended because it ran out of room, and False
+    #     when it ended because the paragraph did. Only the first kind may be
+    #     justified: stretching a paragraph's last line across the page is what makes
+    #     justification look broken.
+    #
+    #     The distinction has to be made here, while wrapping, because it cannot be
+    #     recovered afterwards. A blank line following would suggest it, and that
+    #     works for a file with one line per paragraph - but a hard-wrapped file, of
+    #     the sort Project Gutenberg ships, has a non-blank line after almost every
+    #     line, and the short remainder of each source line would be stretched to
+    #     full width.
+    #
     lines = []
     wrapped = []
     next_offset = start_offset
@@ -1236,6 +1549,9 @@ def read_page_stream(filename, start_offset):
                     continue
 
                 words = stripped.split(" ")
+                # Narrower while the first line of the page is being built.
+                budget = (MAX_LINE_WIDTH_PX - STATUS_RESERVE_PX if not lines
+                          else MAX_LINE_WIDTH_PX)
                 current_line = ""
                 current_width = 0
                 word_start_in_raw = 0
@@ -1254,7 +1570,7 @@ def read_page_stream(filename, start_offset):
                         test_line = word
                         test_width = word_width
 
-                    if test_width <= MAX_LINE_WIDTH_PX:
+                    if test_width <= budget:
                         current_line = test_line
                         current_width = test_width
                     else:
@@ -1279,10 +1595,10 @@ def read_page_stream(filename, start_offset):
                         rest = None
                         if hyphenate_ok and len(lines) + 1 < MAX_LINES_PER_PAGE:
                             if current_line:
-                                space_left = (MAX_LINE_WIDTH_PX - current_width
+                                space_left = (budget - current_width
                                               - SPACE_WIDTH)
                             else:
-                                space_left = MAX_LINE_WIDTH_PX
+                                space_left = budget
                             if space_left > 0:
                                 head, rest = _hyphenate_word(word, space_left)
 
@@ -1350,25 +1666,34 @@ def get_page_lines(page_idx):
 # done on the way to the panel sits between the button and the screen changing.
 # Putting it in the driver cost exactly that: the same total work, all of it in
 # the one place the reader is being watched.
-_frame_scratch = None
+# _frame_scratch and _frame_white are allocated up with the page buffers; only
+# the FrameBuffer wrapper is built lazily, because it needs nothing scarce.
 _frame_canvas = None
-_frame_white = None
 
 
 def begin_frame():
-    """A blank landscape canvas. Draw, then call end_frame()."""
-    global _frame_scratch, _frame_canvas, _frame_white
-    if _frame_scratch is None:
-        _frame_scratch = bytearray(epd.landscape_buffer_size)
-        _frame_white = b"\xFF" * epd.landscape_buffer_size
+    # A blank landscape canvas. Draw, then call end_frame().
+    global _frame_canvas
+    if _frame_canvas is None:
         _frame_canvas = new_canvas(_frame_scratch)
-    _frame_scratch[:] = _frame_white      # one copy, not a Python clear loop
+    # Chunked rather than one big copy: 74 slice assignments instead of a
+    # second screen-sized constant living in RAM for the life of the program.
+    _n = len(_frame_scratch)
+    for _i in range(0, _n - 63, 64):
+        _frame_scratch[_i:_i + 64] = _FF64
+    for _i in range((_n // 64) * 64, _n):
+        _frame_scratch[_i] = 0xFF
     return _frame_canvas
 
 
-def end_frame():
-    """Transpose the scratch into a fresh buffer in the panel's orientation."""
-    out = bytearray(epd.buffer_size)
+def end_frame(out=None):
+    # Transpose the scratch into a buffer in the panel's orientation.
+    #
+    #     Takes one from the pool unless given one. Never allocates in the steady
+    #     state - see the buffer block near the top for why that matters.
+    #
+    if out is None:
+        out = _take_buf()
     rotate(_frame_scratch, out,
            epd.landscape_width, epd.landscape_height, epd.landscape_stride,
            epd.width, epd.height, epd.bytes_per_row, epd.rotation)
@@ -1401,7 +1726,8 @@ def render_page_buffer(page_idx):
     for i in range(len(lines)):
         if JUSTIFY_TEXT and wrapped[i]:
             draw_text_justified(canvas, lines[i], PADDING_X, y,
-                                MAX_LINE_WIDTH_PX, color=0)
+                                MAX_LINE_WIDTH_PX - (STATUS_RESERVE_PX if i == 0
+                                                     else 0), color=0)
         else:
             draw_text(canvas, lines[i], PADDING_X, y, color=0)
         y += LINE_HEIGHT
@@ -1426,17 +1752,8 @@ def render_page_buffer(page_idx):
         status_y = 2
         status_h = 10
 
-        area_is_free = True
-        for dy in range(status_h):
-            for dx in range(status_w):
-                if canvas.pixel(status_x + dx, status_y + dy) == 0:
-                    area_is_free = False
-                    break
-            if not area_is_free:
-                break
-
-        if area_is_free:
-            canvas.text(status_text, status_x, status_y, 0)
+        # No collision test needed: the space is reserved during wrapping.
+        canvas.text(status_text, status_x, status_y, 0)
 
     return end_frame()
 
@@ -1477,9 +1794,37 @@ curr_buf = None
 next_buf = None
 prev_buf = None
 
+_cache_released = False
+
+
+def release_neighbours():
+    # Hand the cached next/previous pages back to the pool.
+    #
+    # Anything that draws a full screen which is not a page - the menu, the
+    # picker, the jump-to screen - needs a buffer to draw into, and all three
+    # are normally held by the page cache. On the ESP32-S3 the allocator simply
+    # found another 4736 bytes; on the RP2040 there is no other 4736 bytes and
+    # opening the menu died with a MemoryError.
+    #
+    # The pages are not lost, only their bitmaps: whoever closes the menu calls
+    # prefetch_neighbours() and they are drawn again from the offsets, which is
+    # work the reader was going to do during the next idle anyway.
+    global next_buf, prev_buf, _cache_released
+    _give_buf(next_buf)
+    _give_buf(prev_buf)
+    next_buf = None
+    prev_buf = None
+    _cache_released = True
+
+
 def prefetch_neighbours(idx):
-    global next_buf, prev_buf
+    global next_buf, prev_buf, _cache_released
+    _cache_released = False
     set_led(True)
+    _give_buf(next_buf)
+    _give_buf(prev_buf)
+    next_buf = None
+    prev_buf = None
     next_buf = render_page_buffer(idx + 1)
     prev_buf = render_page_buffer(idx - 1) if idx > 0 else None
     set_led(False)
@@ -1487,6 +1832,7 @@ def prefetch_neighbours(idx):
 def shift_cache_forward(new_idx):
     global curr_buf, next_buf, prev_buf
     set_led(True)
+    _give_buf(prev_buf)          # the page we are leaving behind for good
     prev_buf = curr_buf
     curr_buf = next_buf
     next_buf = render_page_buffer(new_idx + 1)
@@ -1495,6 +1841,7 @@ def shift_cache_forward(new_idx):
 def shift_cache_backward(new_idx):
     global curr_buf, next_buf, prev_buf
     set_led(True)
+    _give_buf(next_buf)
     next_buf = curr_buf
     curr_buf = prev_buf
     prev_buf = render_page_buffer(new_idx - 1) if new_idx > 0 else None
@@ -1526,6 +1873,7 @@ def show_restored_page(buf):
         return
 
     if FAST_WAKE:
+        release_neighbours()
         epd.set_previous(render_sleep_screen())
         display_page(buf, is_full=False)
         return
@@ -1537,8 +1885,8 @@ def show_restored_page(buf):
 # value here would freeze whatever the boot font happened to give.
 
 
-def render_list(title, labels, sel, top):
-    """A scrolling list with the selected row inverted. Books and fonts both."""
+def render_list(title, labels, sel, top, out=None):
+    # A scrolling list with the selected row inverted. Books and fonts both.
     canvas = begin_frame()
 
     # Every y here is the top of a glyph box, which is what PropFont.draw
@@ -1563,7 +1911,7 @@ def render_list(title, labels, sel, top):
         else:
             draw_text(canvas, label, PADDING_X, row_y, color=0)
 
-    return end_frame()
+    return end_frame(out)
 
 
 def picker_label(name):
@@ -1580,7 +1928,7 @@ def picker_label(name):
 
 
 def turn_forward():
-    """Advance one page. False at the end of the book."""
+    # Advance one page. False at the end of the book.
     global current_page_idx
     if next_buf is None:
         return False
@@ -1589,18 +1937,19 @@ def turn_forward():
     display_page(next_buf)
     shift_cache_forward(current_page_idx)
     save_position()
+    diag_bump(1)
     print(f"[Page {current_page_idx + 1}] Turn took {time.monotonic() - t0:.2f}s")
     return True
 
 
 def turn_back(pages=1):
-    """Go back `pages`, clamped at the start. False if already there.
-
-    Two pages back is what a double tap needs: the first tap has already moved
-    forward one, so undoing that and stepping back lands on the page before the
-    one the reader was on. Only one page back is cached, so the two-page case
-    re-renders.
-    """
+    # Go back `pages`, clamped at the start. False if already there.
+    #
+    #     Two pages back is what a double tap needs: the first tap has already moved
+    #     forward one, so undoing that and stepping back lands on the page before the
+    #     one the reader was on. Only one page back is cached, so the two-page case
+    #     re-renders.
+    #
     global current_page_idx, curr_buf, next_buf, prev_buf
     target = max(0, current_page_idx - pages)
     if target == current_page_idx:
@@ -1626,98 +1975,113 @@ def turn_back(pages=1):
 
 
 def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
-    """Scroll a list and return the chosen index, or None.
-
-    The gesture vocabulary and its subtleties live here once: tap moves down,
-    double-tap moves up, hold selects, longer hold backs out. The double-tap
-    correction in particular is easy to get subtly wrong - the refresh outlasts
-    the double-tap window, so the second press is already queued by the time we
-    look - and having the font menu re-implement it would have meant two places
-    to get it right.
-    """
-    if not labels:
-        return None
-    top = 0
-    idle_since = time.monotonic()
-    pending_release = None
-    drain_events()
-
-    while True:
-        if sel < top:
-            top = sel
-        elif sel >= top + PICKER_ROWS:
-            top = sel - PICKER_ROWS + 1
-        top = max(0, min(top, max(0, len(labels) - PICKER_ROWS)))
-
-        display_page(render_list(title, labels, sel, top))
-
-        if pending_release is not None:
-            if was_double_tap(pending_release):
-                sel = (sel - 2) % len(labels)
-                pending_release = None
-                continue
-            pending_release = None
+    # Scroll a list and return the chosen index, or None.
+    #
+    #     The gesture vocabulary and its subtleties live here once: tap moves down,
+    #     double-tap moves up, hold selects, longer hold backs out. The double-tap
+    #     correction in particular is easy to get subtly wrong - the refresh outlasts
+    #     the double-tap window, so the second press is already queued by the time we
+    #     look - and having the font menu re-implement it would have meant two places
+    #     to get it right.
+    #
+    release_neighbours()
+    # One buffer for the whole menu session. Every redraw used to take another
+    # from the pool and drop it, so scrolling a list drained the pool: the
+    # buffers became garbage rather than going back, and the reader then died
+    # in prefetch_neighbours() on the way out, with nothing left to draw into.
+    _ui = _take_buf()
+    try:
+        if not labels:
+            return None
+        top = 0
+        idle_since = time.monotonic()
+        pending_release = None
+        drain_events()
 
         while True:
-            event = next_press()
-            if event is None:
-                if time.monotonic() - idle_since >= PICKER_TIMEOUT:
-                    log_step(idle_msg)
-                    return None
-                time.sleep(0.02)
-                continue
+            if sel < top:
+                top = sel
+            elif sel >= top + PICKER_ROWS:
+                top = sel - PICKER_ROWS + 1
+            top = max(0, min(top, max(0, len(labels) - PICKER_ROWS)))
 
-            if event.key_number == KEY_BACK:
-                sel = (sel - 1) % len(labels)
+            display_page(render_list(title, labels, sel, top, _ui))
+
+            if pending_release is not None:
+                if was_double_tap(pending_release):
+                    sel = (sel - 2) % len(labels)
+                    pending_release = None
+                    continue
+                pending_release = None
+
+            while True:
+                event = next_press()
+                if event is None:
+                    if time.monotonic() - idle_since >= PICKER_TIMEOUT:
+                        log_step(idle_msg)
+                        return None
+                    time.sleep(0.02)
+                    continue
+
+                if event.key_number == KEY_BACK:
+                    sel = (sel - 1) % len(labels)
+                    break
+
+                kind, release = classify_hold(KEY_NEXT, event.timestamp)
+                if kind == "picker":        # hold selects
+                    return sel
+                if kind == "sleep":         # hold longer backs out
+                    return None
+                sel = (sel + 1) % len(labels)  # tap moves down, corrected above
+                pending_release = release
                 break
 
-            kind, release = classify_hold(KEY_NEXT, event.timestamp)
-            if kind == "picker":        # hold selects
-                return sel
-            if kind == "sleep":         # hold longer backs out
-                return None
-            sel = (sel + 1) % len(labels)  # tap moves down, corrected above
-            pending_release = release
-            break
+            idle_since = time.monotonic()
 
-        idle_since = time.monotonic()
 
+    finally:
+        _give_buf(_ui)
 
 def run_fonts():
-    """Pick a reading font. Applies it and returns True if it changed."""
-    global _font_index
-    if len(FONTS) < 2:
-        display_page(render_message("Fonts", [
-            "Only one font is installed.", "",
-            "Copy more .pcf files into /fonts.",
-            "tools/ttf2bdf.py and tools/bdf2pcf.py",
-            "make them from any TTF."]))
-        time.sleep(4)
-        return False
+    # Pick a reading font. Applies it and returns True if it changed.
+    _ui = _take_buf()
+    try:
+        global _font_index
+        if len(FONTS) < 2:
+            display_page(render_message_into(_ui, "Fonts", [
+                "Only one font is installed.", "",
+                "Copy more .pcf files into /fonts.",
+                "tools/ttf2bdf.py and tools/bdf2pcf.py",
+                "make them from any TTF."]))
+            time.sleep(4)
+            return False
 
-    labels = []
-    for i in range(len(FONTS)):
-        labels.append(("* " if i == _font_index else "  ") + font_label(FONTS[i][1]))
-    idx = choose_from_list("Fonts", labels, _font_index,
-                           "Font menu idle; keeping the current font.")
-    if idx is None or idx == _font_index:
-        return False
+        labels = []
+        for i in range(len(FONTS)):
+            labels.append(("* " if i == _font_index else "  ") + font_label(FONTS[i][1]))
+        idx = choose_from_list("Fonts", labels, _font_index,
+                               "Font menu idle; keeping the current font.")
+        if idx is None or idx == _font_index:
+            return False
 
-    previous = FONTS[_font_index][0]
-    if not load_reader_font(FONTS[idx][0]):
-        load_reader_font(previous)      # put back what was working
-        return False
-    _font_index = idx
-    save_font_choice(idx)
-    return True
+        previous = FONTS[_font_index][0]
+        if not load_reader_font(FONTS[idx][0]):
+            load_reader_font(previous)      # put back what was working
+            return False
+        _font_index = idx
+        save_font_choice(idx)
+        return True
 
+
+    finally:
+        _give_buf(_ui)
 
 def run_picker():
-    """Show the library. Returns the chosen path, or None if nothing was picked.
-
-    Next moves down (short press) or opens/selects (long press).
-    Back moves up (short press).
-    """
+    # Show the library. Returns the chosen path, or None if nothing was picked.
+    #
+    #     Next moves down (short press) or opens/selects (long press).
+    #     Back moves up (short press).
+    #
     names = list_books()
     # Unconverted EPUBs go at the end, prefixed in the list, so the books you
     # can actually read stay at the top.
@@ -1748,11 +2112,11 @@ def run_picker():
 
 
 def _snap_to_line(pos):
-    """First byte after the next newline at or after pos.
-
-    Done in binary: seeking to an arbitrary byte can land mid-UTF-8, which text
-    mode will not decode. Page offsets are byte offsets anyway.
-    """
+    # First byte after the next newline at or after pos.
+    #
+    #     Done in binary: seeking to an arbitrary byte can land mid-UTF-8, which text
+    #     mode will not decode. Page offsets are byte offsets anyway.
+    #
     if pos <= 0:
         return 0
     try:
@@ -1766,17 +2130,17 @@ def _snap_to_line(pos):
 
 
 def _pages_around(target, back_bytes=4000):
-    """(previous page offset, landing page offset) for a byte position.
-
-    Paginating from the start of the book to find a page boundary would mean
-    parsing everything before it. Instead start a few KB back, snap to a line,
-    and walk forward the handful of pages that covers - so a jump costs a couple
-    of milliseconds instead of scaling with book length.
-
-    The boundaries differ from what pagination from page one would produce,
-    because wrapping depends on where you started. That is invisible to the
-    reader: what matters is that the two pages returned are contiguous.
-    """
+    # (previous page offset, landing page offset) for a byte position.
+    #
+    #     Paginating from the start of the book to find a page boundary would mean
+    #     parsing everything before it. Instead start a few KB back, snap to a line,
+    #     and walk forward the handful of pages that covers - so a jump costs a couple
+    #     of milliseconds instead of scaling with book length.
+    #
+    #     The boundaries differ from what pagination from page one would produce,
+    #     because wrapping depends on where you started. That is invisible to the
+    #     reader: what matters is that the two pages returned are contiguous.
+    #
     start = _snap_to_line(max(0, target - back_bytes))
     prev = start
     off = start
@@ -1792,112 +2156,31 @@ def _pages_around(target, back_bytes=4000):
 
 
 def current_percent():
-    """Where we are, rounded to the nearest GOTO_STEP for display.
-
-    Lossy on purpose - the screen shows whole steps - so it is only ever the
-    *label* for the current position, never a way back to it. Anything that
-    needs the real position must use page_offsets[current_page_idx].
-    """
+    # Where we are, rounded to the nearest GOTO_STEP for display.
+    #
+    #     Lossy on purpose - the screen shows whole steps - so it is only ever the
+    #     *label* for the current position, never a way back to it. Anything that
+    #     needs the real position must use page_offsets[current_page_idx].
+    #
     if FILE_SIZE <= 0 or current_page_idx >= len(page_offsets):
         return 0
     pct = page_offsets[current_page_idx] / FILE_SIZE * 100.0
     return int(max(0, min(100, round(pct / GOTO_STEP) * GOTO_STEP)))
 
 
-def render_goto_screen(pct):
-    # Deliberately the same y positions as the E213, which is 6px shorter. The
-    # slack lands at the bottom, and keeping the two files diffable is worth
-    # more than six pixels of centring.
-    canvas = begin_frame()
-
-    title = "Jump to"
-    draw_text(canvas, title, (WIDTH - get_string_width(title)) // 2, 0, color=0)
-
-    # No double-size any more: PropFont draws one size, and scaling a 1-bit
-    # bitmap by doubling pixels looks worse than the plain glyphs do.
-    big = "%d%%" % pct
-    draw_text(canvas, big, (WIDTH - get_string_width(big)) // 2, 22, color=0)
-
-    bar_x, bar_y, bar_w, bar_h = 10, 66, WIDTH - 20, 12
-    canvas.rect(bar_x, bar_y, bar_w, bar_h, 0)
-    fill = int((bar_w - 4) * pct / 100.0)
-    if fill > 0:
-        canvas.fill_rect(bar_x + 2, bar_y + 2, fill, bar_h - 4, 0)
-
-    # Minus on the left, plus on the right, matching the bar underneath it.
-    hint1 = "double-tap -%d%%    tap +%d%%" % (GOTO_STEP, GOTO_STEP)
-    draw_text(canvas, hint1, (WIDTH - get_string_width(hint1)) // 2, 86, color=0)
-    hint2 = "hold to open here"
-    draw_text(canvas, hint2, (WIDTH - get_string_width(hint2)) // 2, 101, color=0)
-
-    return end_frame()
-
-
 def run_goto():
-    """Percentage picker. Returns the chosen percent, or None to stay put.
-
-    Same gesture vocabulary as the book picker - tap moves, hold commits, longer
-    hold backs out - so there is nothing new to learn.
-
-    None means "do not move", and it covers backing out, timing out, *and*
-    committing the value we arrived on. That last one matters: the number on
-    screen is rounded to GOTO_STEP, so a reader sitting at 37% sees 35%, and
-    jumping to the 35% the screen offers would quietly shove them back two
-    percent of the book - a couple of pages, silently, for a gesture that
-    looked like "stay here". Coming in and confirming without moving now costs
-    nothing at all, and the exact position survives because nothing is asked to
-    reconstruct it.
-    """
-    start_pct = current_percent()
-    pct = start_pct
-    idle_since = time.monotonic()
-    pending_release = None
-    drain_events()
-
-    while True:
-        display_page(render_goto_screen(pct))
-
-        # The refresh outlasts the double-tap window, so if that tap was really
-        # the first half of a double, the second press is already queued.
-        if pending_release is not None:
-            if was_double_tap(pending_release):
-                pct = (pct - 2 * GOTO_STEP) % (100 + GOTO_STEP)
-            pending_release = None
-
-        while True:
-            event = next_press()
-            if event is None:
-                if time.monotonic() - idle_since >= PICKER_TIMEOUT:
-                    log_step("Jump-to idle; staying where we were.")
-                    return None
-                time.sleep(0.02)
-                continue
-
-            if event.key_number == KEY_BACK:
-                pct = (pct - GOTO_STEP) % (100 + GOTO_STEP)
-                break
-
-            kind, release = classify_hold(KEY_NEXT, event.timestamp)
-            if kind == "picker":        # hold opens the book here
-                if pct == start_pct:
-                    log_step("Jump-to: %d%% unchanged, keeping the exact "
-                             "position (offset %d)."
-                             % (pct, page_offsets[current_page_idx]))
-                    return None
-                return pct
-            if kind == "sleep":         # hold longer cancels
-                return None
-            # Wraps at the top: on a one-button device, getting from 100% back
-            # to 5% should not need twenty double-taps.
-            pct = (pct + GOTO_STEP) % (100 + GOTO_STEP)
-            pending_release = release
-            break
-
-        idle_since = time.monotonic()
-
+    # Percentage picker. Returns the chosen percent, or None to stay put.
+    # Implemented in lib/gotoui.py, compiled only when opened - see the note
+    # there on what boot-time code costs this board.
+    try:
+        import gotoui
+    except Exception as e:
+        log_step("Jump-to unavailable (%s)" % e)
+        return None
+    return gotoui.run(globals())
 
 def jump_to_percent(pct):
-    """Open the current book at pct%, with both neighbours cached."""
+    # Open the current book at pct%, with both neighbours cached.
     global page_offsets, current_page_idx, curr_buf, next_buf, prev_buf
 
     target = int(FILE_SIZE * pct / 100.0)
@@ -1925,8 +2208,14 @@ def jump_to_percent(pct):
     log_step("Jumped to %d%% (offset %d)" % (pct, page_offsets[current_page_idx]))
 
 
-def render_message(title, lines):
-    """A centred title with a few lines under it. Used by the converter."""
+def render_message_into(out, title, lines):
+    # Argument-first form so a caller holding one UI buffer can pass it
+    # through without repeating `out=` at every call site.
+    return render_message(title, lines, out)
+
+
+def render_message(title, lines, out=None):
+    # A centred title with a few lines under it. Used by the converter.
     canvas = begin_frame()
     draw_text(canvas, title, (WIDTH - get_string_width(title)) // 2, PAGE_TOP,
               color=0)
@@ -1936,116 +2225,32 @@ def render_message(title, lines):
         draw_text(canvas, fit_text(line, MAX_LINE_WIDTH_PX), PADDING_X, y,
                   color=0)
         y += LINE_HEIGHT
-    return end_frame()
+    return end_frame(out)
 
 
 def convert_epub(path):
-    """Convert an .epub to a .txt beside it. Returns the .txt path, or None.
-
-    The conversion writes to the drive, which the board can only do when the
-    USB host is not holding it - so this works on battery and refuses, with a
-    reason on screen, when plugged in. epub_xtract makes that call itself; all
-    this does is show what it decided.
-    """
-    title = book_title(path)
-    # Partial, not full. A full refresh flashes for ~2.5 s before a conversion
-    # that is itself slow, and this screen is transient. The cost is that some
-    # of the page underneath may ghost through it - on a message this brief,
-    # that is a fair trade.
-    display_page(render_message("Converting", [title, "", "Opening the EPUB…"]))
-
+    # Convert a .epub in place and return the .txt path, or None.
+    #
+    #     The work is in lib/convertui.py, compiled only when this runs. See the
+    #     note at the top of that file: on the Badger, boot-time code is charged
+    #     at roughly five bytes of contiguous heap per byte of source, and this
+    #     path is used once per book at most.
     try:
-        import epub_xtract
+        import convertui
     except Exception as e:
-        display_page(render_message("Cannot convert",
-                                    ["The EPUB converter is not installed:",
-                                     "%s" % e, "",
-                                     "lib/epub_xtract.py, uzipfile.py",
-                                     "and inflate.py are needed."]))
-        time.sleep(4)
+        log_step("EPUB support unavailable (%s)" % e)
         return None
-
-    # One update per chapter, no rate limit. That used to cost the conversion
-    # ~0.5 s per draw, because the driver waited for each refresh to finish
-    # before returning; it now starts the refresh and collects the wait only
-    # when something next touches the panel. So the panel redraws while the
-    # next chapter is being decompressed, and the drawing is very nearly free.
-    def progress(stage, done, total, name=""):
-        if stage == "chapter":
-            display_page(render_message("Converting",
-                                        [title, "", "%d of %d" % (done, total)]))
-        elif stage == "readonly":
-            display_page(render_message("Cannot convert",
-                                        ["The USB host owns the drive.", "",
-                                         "Unplug and convert on battery,",
-                                         "then plug back in."]))
-        elif stage in ("failed", "empty"):
-            display_page(render_message("Conversion failed",
-                                        [title, "",
-                                         "Nothing could be extracted.",
-                                         "See the .convert.log beside it."]))
-
-    # Absolute, always. The reader names books the way its picker lists them -
-    # "alice.epub" in the root, "books/alice.epub" under /books - while
-    # epub_xtract.source_path() reads a name without a leading slash as being
-    # inside /books. So "alice.epub" was looked for at /books/alice.epub and
-    # "books/alice.epub" at /books/books/alice.epub. Both conventions are
-    # reasonable; they just are not the same one.
-    source = path if path.startswith("/") else "/" + path
-
-    set_led(True)
-    t0 = time.monotonic()
-    out = None
-    err = None
-    try:
-        out = epub_xtract.convert_book(source, progress=progress, keep_display=True)
-    except Exception as e:
-        err = e
-        log_step("EPUB conversion raised: %s" % e)
-    set_led(False)
-
-    # Hand the drive back. epub_xtract takes it with storage.remount() and does
-    # not return it, so without this the host sees a read-only CIRCUITPY until
-    # the next reset - the same trap the battery logger had.
-    try:
-        import storage
-        storage.remount("/", readonly=True)
-    except Exception:
-        pass
-
-    if out is None:
-        # Put the converter's own last lines on the panel. The .convert.log has
-        # the full story, but reading it means plugging in, and the thing that
-        # just failed may be the reason the log is not there.
-        detail = []
-        try:
-            detail = list(epub_xtract.STATUS_HISTORY)[-4:]
-        except Exception:
-            pass
-        if err is not None:
-            detail.append("raised: %s" % err)
-        display_page(render_message("Conversion failed", [title, ""] + detail))
-        time.sleep(6)
-        return None
-
-    if out:
-        log_step("Converted %s in %.1fs -> %s" % (path, time.monotonic() - t0, out))
-        # epub_xtract returns an absolute path; the reader's book list is
-        # relative to the root for files in it, so match its convention.
-        return out[1:] if out.startswith("/") else out
-
-    time.sleep(3)
-    return None
+    return convertui.convert(path, globals())
 
 
 def reflow_current_page():
-    """Re-paginate from where we are, after the layout metrics changed.
-
-    The byte offset survives a font change - it is a position in the file, not
-    in the layout - but every page boundary derived from it does not, so the
-    offsets list is rebuilt starting here. That is also why a font change does
-    not lose your place: the reader has never stored a page number.
-    """
+    # Re-paginate from where we are, after the layout metrics changed.
+    #
+    #     The byte offset survives a font change - it is a position in the file, not
+    #     in the layout - but every page boundary derived from it does not, so the
+    #     offsets list is rebuilt starting here. That is also why a font change does
+    #     not lose your place: the reader has never stored a page number.
+    #
     global page_offsets, current_page_idx, curr_buf, next_buf, prev_buf
     offset = page_offsets[current_page_idx]
     page_offsets = [offset]
@@ -2062,7 +2267,7 @@ def reflow_current_page():
 
 
 def switch_to_book(path):
-    """Store where we are, then open path at its own remembered position."""
+    # Store where we are, then open path at its own remembered position.
     global current_file, FILE_SIZE, page_offsets, current_page_idx
     global curr_buf, next_buf, prev_buf
 
@@ -2088,26 +2293,26 @@ def switch_to_book(path):
 
 
 def wait_buttons_released(timeout=5.0):
-    """Block until neither button is held, so wake alarms can be armed safely.
-
-    alarm.pin.PinAlarm(value=False) is level-triggered: arming it while the pin
-    is still pulled low fires it instantly and the board wakes right back up.
-    Returns False if the timeout expires, in which case the caller sleeps
-    anyway - waking immediately is better than hanging forever on a stuck
-    button.
-    """
+    # Block until neither button is held, so wake alarms can be armed safely.
+    #
+    #     alarm.pin.PinAlarm(value=False) is level-triggered: arming it while the pin
+    #     is still pulled low fires it instantly and the board wakes right back up.
+    #     Returns False if the timeout expires, in which case the caller sleeps
+    #     anyway - waking immediately is better than hanging forever on a stuck
+    #     button.
+    #
     pins = []
     try:
         for p in (PIN_KEY_NEXT, PIN_KEY_BACK):
             io = digitalio.DigitalInOut(p)
             io.direction = digitalio.Direction.INPUT
-            io.pull = digitalio.Pull.UP
+            io.pull = KEY_PULL
             pins.append(io)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if all(io.value for io in pins):
+            if not any(key_is_down(io) for io in pins):
                 time.sleep(0.03)                 # settle, then confirm
-                if all(io.value for io in pins):
+                if not any(key_is_down(io) for io in pins):
                     return True
             time.sleep(0.01)
         log_step("Buttons still held after %.1fs; arming alarms anyway." % timeout)
@@ -2124,16 +2329,16 @@ def wait_buttons_released(timeout=5.0):
 
 
 def enter_light_sleep():
-    """Pause between page turns at ~1 mA, waking instantly.
-
-    Unlike deep sleep the VM survives, so there is no reboot and no re-render:
-    the page cache, the font and the glyph cache are all still in RAM when the
-    button is pressed. That is the whole reason this is worth the teardown.
-
-    Returns (key, held_ms) for the press that woke us, so the caller can act on
-    it as an ordinary gesture - otherwise the press is swallowed and every page
-    costs two of them.
-    """
+    # Pause between page turns at ~1 mA, waking instantly.
+    #
+    #     Unlike deep sleep the VM survives, so there is no reboot and no re-render:
+    #     the page cache, the font and the glyph cache are all still in RAM when the
+    #     button is pressed. That is the whole reason this is worth the teardown.
+    #
+    #     Returns (key, held_ms) for the press that woke us, so the caller can act on
+    #     it as an ordinary gesture - otherwise the press is swallowed and every page
+    #     costs two of them.
+    #
     global keys
 
     # No save here. Light sleep keeps the VM, so the position is still in RAM
@@ -2147,15 +2352,18 @@ def enter_light_sleep():
     keys.deinit()
     wait_buttons_released()
 
-    next_alarm = alarm.pin.PinAlarm(pin=PIN_KEY_NEXT, value=False, pull=True)
-    back_alarm = alarm.pin.PinAlarm(pin=PIN_KEY_BACK, value=False, pull=True)
+    next_alarm = alarm.pin.PinAlarm(pin=PIN_KEY_NEXT, value=KEY_DOWN, pull=True)
+    back_alarm = (None if PANEL.get("single_wake_alarm")
+                  else alarm.pin.PinAlarm(pin=PIN_KEY_BACK, value=KEY_DOWN, pull=True))
     # The deadline that eventually drops us into real deep sleep. One wake per
     # SLEEP_TIMEOUT costs nothing next to the 1 mA it is there to escape.
     deadline_alarm = alarm.time.TimeAlarm(
         monotonic_time=time.monotonic() + SLEEP_TIMEOUT
     )
     t_sleep_start = time.monotonic()
-    woke = alarm.light_sleep_until_alarms(next_alarm, back_alarm, deadline_alarm)
+    _armed = [next_alarm, deadline_alarm] if back_alarm is None else [
+        next_alarm, back_alarm, deadline_alarm]
+    woke = alarm.light_sleep_until_alarms(*_armed)
     slept = time.monotonic() - t_sleep_start
 
     # Identity alone cannot classify the wake. A fast press-and-release can wake
@@ -2167,14 +2375,44 @@ def enter_light_sleep():
     #
     # So fall back on elapsed time, which is unambiguous: an unattributed wake
     # that happened long before SLEEP_TIMEOUT was a button, not a timeout.
-    if woke is back_alarm:
-        key = KEY_BACK
-    elif woke is next_alarm:
+    # Which button - decided by the pins first, then by how long we slept.
+    #
+    # Neither alone is enough, and both failures were measured here. Trusting
+    # the alarm object alone: a level-triggered PinAlarm on this board fires
+    # the moment it is armed, so one press ran the book forward continuously
+    # until USB was reconnected - 19 such phantom wakes in one short session.
+    # Trusting the pin alone: an ordinary tap is already released by the time
+    # this runs, so single presses stopped working and only double presses got
+    # through, the second press landing while the reader was still awake.
+    #
+    # Time separates them cleanly. A phantom fires immediately - slept is
+    # essentially zero. A real press waits for a human, which is never less
+    # than a good fraction of a second after the reader went to sleep.
+    PHANTOM_S = 0.15
+    key = KEY_IGNORE
+    for _k, _pin in ((KEY_NEXT, PIN_KEY_NEXT), (KEY_BACK, PIN_KEY_BACK)):
+        io = digitalio.DigitalInOut(_pin)
+        io.direction = digitalio.Direction.INPUT
+        io.pull = KEY_PULL
+        down = key_is_down(io)
+        io.deinit()
+        if down:
+            key = _k
+            break
+
+    if key != KEY_IGNORE:
+        diag_bump(3)                      # still held: certain
+    elif woke is back_alarm and slept >= PHANTOM_S:
+        key = KEY_BACK                    # released already, but real
+        diag_bump(3)
+    elif woke is next_alarm and slept >= PHANTOM_S:
         key = KEY_NEXT
-    elif slept < SLEEP_TIMEOUT - 5.0:
-        key = KEY_NEXT          # unattributed but early: almost certainly NEXT
-    else:
-        key = None              # genuinely nothing pressed for SLEEP_TIMEOUT
+        diag_bump(3)
+    elif woke is next_alarm or woke is back_alarm:
+        diag_bump(0)                      # fired instantly: phantom
+        time.sleep(0.25)                  # do not re-arm into a spin
+    elif slept >= SLEEP_TIMEOUT - 5.0:
+        key = None                        # the deadline really did elapse
 
     # The finger may still be on the button. Measure the hold BEFORE rebuilding
     # anything, so waking with a long press opens the picker exactly as it would
@@ -2185,10 +2423,10 @@ def enter_light_sleep():
     if key == KEY_NEXT:
         btn = digitalio.DigitalInOut(PIN_KEY_NEXT)
         btn.direction = digitalio.Direction.INPUT
-        btn.pull = digitalio.Pull.UP
+        btn.pull = KEY_PULL
         start = supervisor.ticks_ms()
         lit = False
-        while not btn.value:
+        while key_is_down(btn):
             held_ms = ticks_ms_diff(supervisor.ticks_ms(), start)
             if held_ms >= SLEEP_HOLD_MS:
                 break
@@ -2226,6 +2464,13 @@ def enter_deep_sleep():
 
     if SHOW_SLEEP_SCREEN:
         log_step("Preparing sleep screen...")
+        # The sleep screen needs a buffer to draw into, and the page cache is
+        # holding all of them. Waking from deep sleep is a reboot that renders
+        # from the stored offset, so the cached neighbours are about to be
+        # thrown away regardless - handing them back first costs nothing.
+        # Without this the reader crashed on the way into deep sleep, which is
+        # to say every time it was left alone for SLEEP_TIMEOUT.
+        release_neighbours()
         sleep_buf = render_sleep_screen()
         set_led(True)
         epd.display_full(sleep_buf)
@@ -2258,14 +2503,14 @@ def enter_deep_sleep():
     # be on it. Arming a level-triggered PinAlarm now would wake us instantly.
     wait_buttons_released()
 
-    wake_btn_next = alarm.pin.PinAlarm(pin=PIN_KEY_NEXT, value=False, pull=True)
-    wake_btn_prev = alarm.pin.PinAlarm(pin=PIN_KEY_BACK, value=False, pull=True)
+    wake_btn_next = alarm.pin.PinAlarm(pin=PIN_KEY_NEXT, value=KEY_DOWN, pull=True)
+    wake_btn_prev = alarm.pin.PinAlarm(pin=PIN_KEY_BACK, value=KEY_DOWN, pull=True)
 
     alarm.exit_and_deep_sleep_until_alarms(wake_btn_next, wake_btn_prev)
 
 def open_picker():
-    """Run the picker and act on the choice. Shared by the awake path and the
-    light-sleep wake path, so a long press behaves identically either way."""
+    # Run the picker and act on the choice. Shared by the awake path and the
+    #     light-sleep wake path, so a long press behaves identically either way.
     chosen = run_picker()
     if chosen == FONTS_ROW:
         if run_fonts():
@@ -2292,6 +2537,14 @@ def open_picker():
         log_step(f"Now reading {chosen} at offset {page_offsets[0]}")
     else:
         display_page(curr_buf)
+    # Whichever branch ran, the neighbour cache may still be empty: it was
+    # handed back on the way in so the menu had a buffer to draw into, and the
+    # branches that merely redisplay the current page do not refill it. Left
+    # empty, the next page turn rotates a None into curr_buf and draws nothing.
+    # Flag rather than "is next_buf None", because at the last page of a book
+    # an empty next_buf is the correct answer and would re-render on every turn.
+    if _cache_released:
+        prefetch_neighbours(current_page_idx)
     drain_events()
 
 
@@ -2341,6 +2594,7 @@ try:
                     # Act on the tap at once. The refresh it triggers is longer
                     # than the double-tap window, so a second press is already
                     # queued by the time we look - forward turns pay nothing.
+                    diag_bump(4)
                     moved = turn_forward()
                     if was_double_tap(release):
                         turn_back(2 if moved else 1)
@@ -2375,6 +2629,8 @@ try:
                             turn_back(2 if moved else 1)
                 elif woke_key == KEY_BACK:
                     turn_back()
+                elif woke_key == KEY_IGNORE:
+                    pass          # woke for no reason; go straight back to sleep
                 else:
                     # No press for SLEEP_TIMEOUT: stop paying 1 mA and drop to
                     # ~16 uA. Costs a reboot to wake, which is the right trade

@@ -34,6 +34,14 @@ PROBES = "ABegoSnh"
 CLOSED = {"o": 1, "b": 1, "d": 1, "p": 1, "q": 1, "e": 1,
           "O": 1, "D": 1, "B": 2, "P": 1, "R": 1, "0": 1, "8": 2}
 
+# Fonts exempt from the stem-width check. It asks whether an outline was
+# rasterised too heavily, and that question does not apply to a bitmap font,
+# whose pixels were placed by hand and are the design rather than an
+# approximation of one. The IBM VGA face draws every stem 2px at 15 rows on
+# purpose. The enclosed-region check below still applies - a hand-drawn font
+# can still be converted wrongly, and that is what would show it.
+HAND_DRAWN = {"vga-8x16.pf"}
+
 
 def load(path):
     d = open(path, "rb").read()
@@ -184,7 +192,8 @@ def main():
         # 73-96%, and the 18px serif at 58% - a large face legitimately has
         # more variation in stroke width, so the bar has to clear it.
         at_allowed = spread.get(allowed, 0.0)
-        stem_ok = stem <= allowed and at_allowed >= 0.55
+        stem_ok = (name in HAND_DRAWN
+                   or (stem <= allowed and at_allowed >= 0.55))
         bad = broken_bowls(font)
         ok = ok and stem_ok and not bad
         fails_stem = not stem_ok
