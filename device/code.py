@@ -2256,18 +2256,45 @@ def render_message(title, lines, out=None):
 
 
 def convert_epub(path):
-    # Convert a .epub in place and return the .txt path, or None.
+    # Convert a .epub, then restart into the result. Never returns normally.
     #
-    #     The work is in lib/convertui.py, compiled only when this runs. See the
-    #     note at the top of that file: on the Badger, boot-time code is charged
-    #     at roughly five bytes of contiguous heap per byte of source, and this
-    #     path is used once per book at most.
+    #     The converter needs the heap the reader is sitting on. Measured on the
+    #     Badger: with the pattern blob, the font and the page buffers held, the
+    #     import dies with 128160 bytes free; with them released it costs 28KB
+    #     and lands with room to spare. So hand them all back first.
+    #
+    #     Being destructive here is free because this path always ends in a
+    #     reset - either into the converted book or back into the old one. That
+    #     also rebuilds hyphenation and the buffer pool properly, which is far
+    #     safer than trying to restore them around a conversion.
+    global hyphenate_ok
+    reset_page_cache()
+    del _buf_pool[1:]            # keep one, for the progress screens
+    try:
+        import hyphenator
+        hyphenator._BLOB = None
+    except Exception:
+        pass
+    hyphenate_ok = False
+    gc.collect()
+
+    out = None
     try:
         import convertui
+        out = convertui.convert(path, globals())
     except Exception as e:
-        log_step("EPUB support unavailable (%s)" % e)
-        return None
-    return convertui.convert(path, globals())
+        log_step("Conversion failed: %s" % e)
+
+    if out:
+        try:
+            bookmarks.open(out, list_books())   # open it on the way back up
+        except Exception as e:
+            log_step("Could not select %s: %s" % (out, e))
+        log_step("Converted; restarting into %s" % out)
+    else:
+        log_step("Conversion did not produce a book; restarting.")
+    time.sleep(2)
+    microcontroller.reset()
 
 
 def reflow_current_page():

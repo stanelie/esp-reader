@@ -47,10 +47,11 @@ def convert_epub(path):
             import epub_xtract
         except Exception as e:
             _g("display_page")(_g("render_message_into")(_ui, "Cannot convert",
-                                        ["The EPUB converter is not installed:",
+                                        ["The EPUB converter would not load:",
                                          "%s" % e, "",
-                                         "lib/epub_xtract.py, uzipfile.py",
-                                         "and inflate.py are needed."]))
+                                         "If that is a MemoryError there is",
+                                         "not enough room; anything else means",
+                                         "lib/epub_xtract.py is missing."]))
             time.sleep(4)
             return None
 
