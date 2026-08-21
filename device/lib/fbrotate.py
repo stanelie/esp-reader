@@ -24,18 +24,39 @@
 
 
 def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
-           rotation):
+           rotation, y0=0, y1=None):
     # Transpose `src` (landscape) into `dst` (native). Both are bytearrays.
     #
     #     land_stride / nat_stride are bytes per row.
     #
-    for i in range(len(dst)):
-        dst[i] = 0xFF                     # white; ink is cleared in below
+    # y0/y1 transpose only a band of landscape rows, leaving the rest of `dst`
+    # alone. A menu highlight moving one row does not need the other eight
+    # transposed - measured at ~250ms for a whole frame on the RP2040, which is
+    # most of what makes a keypress feel slow.
+    if y1 is None:
+        y1 = land_h
+    band = (y0 != 0) or (y1 != land_h)
+
+    if not band:
+        for i in range(len(dst)):
+            dst[i] = 0xFF                 # white; ink is cleared in below
+    elif rotation == 3:
+        # One landscape row is one bit position inside a fixed byte column, so
+        # a band of rows is a few whole columns across every native row.
+        c0 = y0 >> 3
+        c1 = ((y1 - 1) >> 3) + 1
+        for r in range(nat_h):
+            base = r * nat_stride
+            for c in range(c0, c1):
+                dst[base + c] = 0xFF
+    else:
+        for i in range(len(dst)):
+            dst[i] = 0xFF
 
     if rotation == 3:
         # A whole landscape row lands in one native column, so the destination
         # bit position is fixed for the row and only the byte index moves.
-        for y in range(land_h):
+        for y in range(y0, y1):
             mask = ~(0x80 >> (y & 7)) & 0xFF
             col = y >> 3
             row_base = y * land_stride

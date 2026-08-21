@@ -90,7 +90,7 @@ def check_lazy():
     # reports the feature unavailable.
     bad = 0
     for name, entry in (("gotoui", "run"), ("convertui", "convert"),
-                        ("convboot", "run")):
+                        ("convboot", "run"), ("menufast", "flip")):
         path = os.path.join(ROOT, "device", "lib", name + ".py")
         if not os.path.exists(path):
             print("  MISSING lazy module: %s" % name); bad += 1; continue

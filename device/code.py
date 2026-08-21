@@ -2013,6 +2013,16 @@ def turn_back(pages=1):
     return True
 
 
+def _menu_flip(buf, old_row, new_row, title, sel, total):
+    # lib/menufast.py, imported on first use - see the note at its top for why
+    # it is not compiled into this file.
+    try:
+        import menufast
+    except Exception:
+        return False
+    return menufast.flip(globals(), buf, old_row, new_row, title, sel, total)
+
+
 def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
     # Scroll a list and return the chosen index, or None.
     #
@@ -2032,6 +2042,10 @@ def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
     try:
         if not labels:
             return None
+        # What is actually on the panel, so the fast path knows whether it can
+        # trust the landscape scratch and which band carries the old highlight.
+        _shown_sel = None
+        _shown_top = None
         top = 0
         idle_since = time.monotonic()
         pending_release = None
@@ -2044,7 +2058,15 @@ def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
                 top = sel - PICKER_ROWS + 1
             top = max(0, min(top, max(0, len(labels) - PICKER_ROWS)))
 
-            display_page(render_list(title, labels, sel, top, _ui))
+            # Only the highlight moved, and the list is unscrolled: flip two
+            # bands instead of drawing the whole screen again.
+            if (_shown_sel is not None and _shown_top == top and sel != _shown_sel
+                    and _menu_flip(_ui, _shown_sel - top, sel - top,
+                                   title, sel, len(labels))):
+                display_page(_ui)
+            else:
+                display_page(render_list(title, labels, sel, top, _ui))
+            _shown_sel, _shown_top = sel, top
 
             if pending_release is not None:
                 if was_double_tap(pending_release):
