@@ -649,7 +649,7 @@ def _notify(progress, stage, done, total, name=""):
         log_status("progress callback failed (continuing): %s" % e)
 
 
-def run_extraction(epub_path, progress=None):
+def run_extraction(epub_path, progress=None, window=None):
     """Convert an EPUB to /books/<name>.txt (+ .cover.<ext>).
 
     `epub_path` may be a full path or just a filename inside /books.
@@ -678,7 +678,13 @@ def run_extraction(epub_path, progress=None):
     try:
         # Ask for the streaming window as the archive opens, so it is placed
         # while the heap is whole rather than carved out of it later.
-        with UZipFile(epub_full_path, window=32768) as uzf:
+        # A window handed in by the caller was taken before this module was
+        # even imported, which is the only time a 32KB block is reliably
+        # available on a board this size - compiling the extractor is itself
+        # enough to leave nothing that large behind.
+        with UZipFile(epub_full_path, window=(0 if window else 32768)) as uzf:
+            if window is not None:
+                uzf._window = window
             # Size the compressed-read buffer from the members actually read -
             # the HTML - and place it now, beside the window, so both long-lived
             # buffers sit together instead of splitting the free space later.
@@ -811,7 +817,7 @@ def txt_path_for(epub_path):
     return "/%s/%s.txt" % (TARGET_DIR, base)
 
 
-def convert_book(epub_path, progress=None, keep_display=True):
+def convert_book(epub_path, progress=None, keep_display=True, window=None):
     """Convert one named EPUB, for the reader to call from the picker.
 
     Same job as main(), without the search for something to convert: the user
@@ -833,7 +839,7 @@ def convert_book(epub_path, progress=None, keep_display=True):
     log_status("build: %s | %s" % (uzipfile.BUILD, inflate.BUILD))
     t0 = time.monotonic()
     try:
-        ok = run_extraction(epub_path, progress=progress)
+        ok = run_extraction(epub_path, progress=progress, window=window)
     except Exception as e:
         log_status("run_extraction raised: %s" % e)
         close_log()

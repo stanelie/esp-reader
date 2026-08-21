@@ -14,10 +14,56 @@
 # output into the panel's BUSY output.
 
 import gc
+import microcontroller
 import os
 import time
 
 t_boot_start = time.monotonic()
+
+# --- IS THIS A CONVERSION BOOT? ---
+# An EPUB conversion needs ~32KB in one piece for DEFLATE's window, plus room
+# to compile the extractor. It cannot get that alongside a running reader, and
+# freeing the reader's memory first does not help: this heap never compacts,
+# so what comes back is scattered holes rather than the block the window needs.
+# Measured - the release-then-convert version got past the import and then died
+# asking for 32768 bytes.
+#
+# So a conversion runs on a boot of its own, with the scarce things NEVER
+# ALLOCATED rather than allocated and given back. Choosing an EPUB records it
+# here and resets; this boot sees the record, converts, clears it and resets
+# again into the result.
+_NVM = getattr(microcontroller, "nvm", None)
+_PEND_AT = 256           # past the 210 bytes lib/bookmarks.py uses
+_PEND_MAGIC = 0xEC
+_PEND_MAX = 96
+
+
+def pending_convert():
+    try:
+        if _NVM is None:
+            return ""
+        head = bytes(_NVM[_PEND_AT:_PEND_AT + 2])
+        if head[0] != _PEND_MAGIC or not 0 < head[1] <= _PEND_MAX:
+            return ""
+        return bytes(_NVM[_PEND_AT + 2:_PEND_AT + 2 + head[1]]).decode()
+    except Exception:
+        return ""
+
+
+def set_pending_convert(path):
+    b = path.encode()[:_PEND_MAX]
+    _NVM[_PEND_AT:_PEND_AT + 2] = bytes([_PEND_MAGIC, len(b)])
+    _NVM[_PEND_AT + 2:_PEND_AT + 2 + len(b)] = b
+
+
+def clear_pending_convert():
+    try:
+        _NVM[_PEND_AT:_PEND_AT + 1] = bytes([0])
+    except Exception:
+        pass
+
+
+PENDING_CONVERT = pending_convert()
 
 # --- SCARCE MEMORY IS CLAIMED BEFORE ANYTHING ELSE RUNS ---
 # Not "early in the boot" - first. Before the panel tables, before a single
@@ -49,7 +95,11 @@ _SCRATCH_BYTES = 4736
 ENABLE_HYPHENATION = True
 
 hyphenate_ok = False
-if ENABLE_HYPHENATION:
+_zip_window = None
+# Skipped outright on a conversion boot - 31.5KB, and a conversion never lays
+# out a page. Skipped rather than loaded and freed, because freeing it back
+# would leave the hole behind.
+if ENABLE_HYPHENATION and not PENDING_CONVERT:
     try:
         import hyphenator
         hyphenator._load()   # fail here, on the file, not mid-page
@@ -78,6 +128,8 @@ if ENABLE_HYPHENATION:
 # exactly like the menu doing nothing.
 _font_buf = None
 try:
+    if PENDING_CONVERT:
+        raise ValueError("conversion boot: no reading font")
     _biggest = 0
     for _e in os.listdir("/fonts"):
         if _e.endswith(".pf") and not _e.startswith("."):
@@ -87,7 +139,8 @@ try:
     if _biggest:
         _font_buf = bytearray(_biggest)
 except Exception as _e2:
-    _claim_notes.append("No shared font buffer (%s); fonts load individually." % _e2)
+    if not PENDING_CONVERT:
+        _claim_notes.append("No shared font buffer (%s); fonts load individually." % _e2)
 
 _frame_scratch = bytearray(_SCRATCH_BYTES)
 # 64 bytes, not a second screen-sized one. Holding a full 4736-byte blank page
@@ -100,8 +153,11 @@ _FF64 = b"\xFF" * 64
 # was the newly rendered page, once per turn, for ever. That churn is what
 # fragmented the heap: each new buffer had to find a contiguous 4.7KB slot and
 # left a 4.7KB hole behind when it was dropped.
+# One on a conversion boot - it draws progress screens and then restarts, so
+# there is no page cache to keep and every buffer not taken is heap the
+# extractor can have in one piece.
 _buf_pool = []
-for _i in range(3):
+for _i in range(1 if PENDING_CONVERT else 3):
     try:
         _buf_pool.append(bytearray(_BUF_BYTES))
     except MemoryError:
@@ -144,7 +200,6 @@ import busio
 import digitalio
 import keypad
 import analogio
-import microcontroller
 import board
 import displayio
 import alarm
@@ -477,40 +532,18 @@ KEYS_ACTIVE_LOW = PANEL.get("keys_active_low", True)
 # Everything that reads a button or arms a wake alarm goes through these two,
 # so a board that wires its buttons the other way needs no other change.
 KEY_PULL = digitalio.Pull.UP if KEYS_ACTIVE_LOW else digitalio.Pull.DOWN
+KEY_DOWN = not KEYS_ACTIVE_LOW          # the pin value that means "pressed"
 # Returned by enter_light_sleep() for a wake that was neither a button nor the
 # deadline. Distinct from None, which means "the deadline elapsed, go to deep
 # sleep", and from a key, which means "act on this press".
 KEY_IGNORE = -1
 
-# --- COUNTERS THAT SURVIVE BEING UNPLUGGED ---
-# The bugs worth chasing on this reader happen with USB out: sleep, wake and
-# power. print() goes to the USB console and is discarded when nothing is
-# listening, which is how a whole session's evidence was lost once already.
-#
-# alarm.sleep_memory is the right store: it survives light AND deep sleep, and
-# unlike microcontroller.nvm it is RAM, so counting into it costs no flash
-# wear. The filesystem is not an option - it is read-only to the device
-# whenever the USB drive is enabled. Cleared by a power cycle, which is the
-# one thing that also clears what we would be measuring.
-#
-#   0 unattributed wakes       1 page turns    2 unattributed, button down
-#   3 wakes the alarm named     4 awake-path taps
-_SM = getattr(alarm, "sleep_memory", None)
-
-
-def diag_bump(i):
-    if _SM is None or (i * 2 + 2) > len(_SM):
-        return
-    v = ((_SM[i * 2] | (_SM[i * 2 + 1] << 8)) + 1) & 0xFFFF
-    _SM[i * 2] = v & 0xFF
-    _SM[i * 2 + 1] = v >> 8
-
-
-def diag_read(i):
-    if _SM is None or (i * 2 + 2) > len(_SM):
-        return -1
-    return _SM[i * 2] | (_SM[i * 2 + 1] << 8)
-KEY_DOWN = not KEYS_ACTIVE_LOW          # the pin value that means "pressed"
+# Diagnostic counters lived here during the wake-bug hunt: three values in
+# alarm.sleep_memory, which survives light and deep sleep and costs no flash
+# wear. They are out again because code is charged at ~5200 bytes of
+# contiguous heap per KB on this board and that was a page buffer's worth.
+# Recover them from git if a bug needs measuring with USB unplugged - print()
+# reaches nobody then, and the filesystem is read-only to the device.
 
 
 def key_is_down(io):
@@ -547,9 +580,6 @@ else:
 
 for _n in _claim_notes:
     log_step(_n)
-log_step("diag: turns %d | wakes: alarm %d, unattributed %d (button down %d)"
-         " | awake taps %d"
-         % (diag_read(1), diag_read(3), diag_read(0), diag_read(2), diag_read(4)))
 log_step("Board %s: %s panel, real light sleep %s"
          % (BOARD_KEY, PANEL_KEY, REAL_LIGHT_SLEEP))
 
@@ -1185,7 +1215,11 @@ if _font_index is None:
         if FONTS[_i][1] == FONT_DEFAULT:
             _font_index = _i
             break
-if not FONTS:
+if PENDING_CONVERT:
+    # Not loaded at all: a conversion lays out no pages, and draw_text falls
+    # back to the built-in face for the progress screens.
+    log_step("Conversion boot; no reading font loaded.")
+elif not FONTS:
     log_step("No fonts in %s; falling back to the built-in 8x12." % FONT_DIR)
 elif not load_reader_font(FONTS[_font_index][0]):
     for _i in range(len(FONTS)):          # any font beats none
@@ -1430,6 +1464,36 @@ def was_double_tap(release_ticks):
             return True
     _stashed_press = event
     return False
+
+# --- A CONVERSION BOOT ENDS HERE ---
+if PENDING_CONVERT:
+    log_step("Converting %s on a clean boot..." % PENDING_CONVERT)
+    # DEFLATE wants 32KB in one piece. Nothing has been carved out of this
+    # heap except one page buffer and the panel's own frame, so it is here to
+    # be had - which is the entire reason for booting specially.
+    try:
+        _zip_window = bytearray(32768)
+    except MemoryError:
+        _zip_window = None
+        log_step("Even on a clean boot there is no 32KB block.")
+    _made = None
+    try:
+        import convertui
+        _made = convertui.convert(PENDING_CONVERT, globals())
+    except Exception as _ce:
+        log_step("Conversion failed: %s" % _ce)
+    clear_pending_convert()
+    if _made:
+        try:
+            Bookmarks(MAX_BOOK_SLOTS).open(_made, list_books())
+        except Exception as _be:
+            log_step("Could not pre-select %s: %s" % (_made, _be))
+        log_step("Converted; restarting into %s" % _made)
+    else:
+        log_step("Conversion produced nothing; restarting.")
+    time.sleep(2)
+    microcontroller.reset()
+
 
 # --- WHICH BOOK, AND WHERE IN IT ---
 _turns_since_save = 0
@@ -1964,7 +2028,6 @@ def turn_forward():
     display_page(next_buf)
     shift_cache_forward(current_page_idx)
     save_position()
-    diag_bump(1)
     print(f"[Page {current_page_idx + 1}] Turn took {time.monotonic() - t0:.2f}s")
     return True
 
@@ -2256,43 +2319,27 @@ def render_message(title, lines, out=None):
 
 
 def convert_epub(path):
-    # Convert a .epub, then restart into the result. Never returns normally.
+    # Queue `path` for conversion and restart. Never returns.
     #
-    #     The converter needs the heap the reader is sitting on. Measured on the
-    #     Badger: with the pattern blob, the font and the page buffers held, the
-    #     import dies with 128160 bytes free; with them released it costs 28KB
-    #     and lands with room to spare. So hand them all back first.
-    #
-    #     Being destructive here is free because this path always ends in a
-    #     reset - either into the converted book or back into the old one. That
-    #     also rebuilds hyphenation and the buffer pool properly, which is far
-    #     safer than trying to restore them around a conversion.
-    global hyphenate_ok
-    reset_page_cache()
-    del _buf_pool[1:]            # keep one, for the progress screens
+    #     The extractor cannot run beside a loaded reader: it needs 32KB in one
+    #     piece for DEFLATE's window plus room to compile itself, and this heap
+    #     does not compact, so releasing the reader's memory first yields holes
+    #     rather than a block. Measured - that version got past the import and
+    #     died asking for 32768 bytes. Booting fresh with those allocations
+    #     never made is the difference.
     try:
-        import hyphenator
-        hyphenator._BLOB = None
+        set_pending_convert(path)
+    except Exception as e:
+        log_step("Could not queue %s for conversion: %s" % (path, e))
+        return None
+    log_step("Queued %s; restarting to convert it." % path)
+    try:
+        display_page(render_message_into(_take_buf(), "Converting",
+                                         [book_title(path), "",
+                                          "Restarting to make room..."]),
+                     is_full=False)
     except Exception:
         pass
-    hyphenate_ok = False
-    gc.collect()
-
-    out = None
-    try:
-        import convertui
-        out = convertui.convert(path, globals())
-    except Exception as e:
-        log_step("Conversion failed: %s" % e)
-
-    if out:
-        try:
-            bookmarks.open(out, list_books())   # open it on the way back up
-        except Exception as e:
-            log_step("Could not select %s: %s" % (out, e))
-        log_step("Converted; restarting into %s" % out)
-    else:
-        log_step("Conversion did not produce a book; restarting.")
     time.sleep(2)
     microcontroller.reset()
 
@@ -2453,16 +2500,15 @@ def enter_light_sleep():
             break
 
     if key != KEY_IGNORE:
-        diag_bump(3)                      # still held: certain
+        pass                              # still held: certain
     elif woke is back_alarm and slept >= PHANTOM_S:
         key = KEY_BACK                    # released already, but real
-        diag_bump(3)
     elif woke is next_alarm and slept >= PHANTOM_S:
         key = KEY_NEXT
-        diag_bump(3)
     elif woke is next_alarm or woke is back_alarm:
-        diag_bump(0)                      # fired instantly: phantom
-        time.sleep(0.25)                  # do not re-arm into a spin
+        # Fired instantly with nothing held: a phantom. Back off rather than
+        # re-arming into a spin at full power.
+        time.sleep(0.25)
     elif slept >= SLEEP_TIMEOUT - 5.0:
         key = None                        # the deadline really did elapse
 
@@ -2647,7 +2693,6 @@ try:
                     # Act on the tap at once. The refresh it triggers is longer
                     # than the double-tap window, so a second press is already
                     # queued by the time we look - forward turns pay nothing.
-                    diag_bump(4)
                     moved = turn_forward()
                     if was_double_tap(release):
                         turn_back(2 if moved else 1)

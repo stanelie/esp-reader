@@ -88,7 +88,8 @@ def convert_epub(path):
         out = None
         err = None
         try:
-            out = epub_xtract.convert_book(source, progress=progress, keep_display=True)
+            out = epub_xtract.convert_book(source, progress=progress, keep_display=True,
+                                           window=R.get("_zip_window"))
         except Exception as e:
             err = e
             _g("log_step")("EPUB conversion raised: %s" % e)
