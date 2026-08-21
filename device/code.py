@@ -422,7 +422,7 @@ def _halt(msg):
     #
     #     Nothing can be put on the panel here - not knowing which panel it is is the
     #     whole problem - so the report goes to the two channels that work without
-    #     one: the UART, and the LED, which is GPIO45 on both boards.
+    #     one: the UART, and the LED, whichever pin the profile names.
     #
     log_step(msg)
     try:
@@ -1286,7 +1286,7 @@ try:
     led = digitalio.DigitalInOut(PIN_LED)
     led.direction = digitalio.Direction.OUTPUT
     led.value = False
-    log_step("Status LED initialized (GPIO45).")
+    log_step("Status LED initialized (%s)." % PANEL.get("led"))
 except Exception as e:
     print(f"LED pin setup failed: {e}")
 
@@ -2482,7 +2482,8 @@ def enter_deep_sleep():
     # prints but its "press any key" wait never arrives. Confirmed on hardware.
     epd.release_bus()
 
-    log_step("Entering deep sleep (Wake with Button '21' or BOOT button)...")
+    log_step("Entering deep sleep (wake on %s or %s)..."
+             % (PANEL.get("key_next"), PANEL.get("key_back")))
 
     if led is not None:
         led.value = True
@@ -2635,8 +2636,17 @@ try:
                     # No press for SLEEP_TIMEOUT: stop paying 1 mA and drop to
                     # ~16 uA. Costs a reboot to wake, which is the right trade
                     # once the book has clearly been put down.
-                    log_step("Idle past SLEEP_TIMEOUT; entering deep sleep.")
-                    enter_deep_sleep()
+                    # Re-check the cable. The decision to sleep was taken
+                    # before the deadline elapsed, and USB may have been
+                    # plugged in during it. Deep sleeping then yanks the drive
+                    # out from under the host mid-mount, which leaves it
+                    # remounted read-only and the board unwritable until the
+                    # filesystem is cleaned from the device side.
+                    if usb_attached():
+                        log_step("Deadline elapsed but USB is attached; staying awake.")
+                    else:
+                        log_step("Idle past SLEEP_TIMEOUT; entering deep sleep.")
+                        enter_deep_sleep()
                 last_activity_time = time.monotonic()
 
         time.sleep(0.02)
