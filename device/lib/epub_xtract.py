@@ -658,6 +658,7 @@ def run_extraction(epub_path, progress=None, window=None):
 
     Returns True if everything converted cleanly.
     """
+    log_status("window supplied: %s" % (len(window) if window else "NO"))
     epub_full_path = source_path(epub_path)
     name = epub_path.split("/")[-1]
     base_name = name[:-5] if name.lower().endswith(".epub") else name

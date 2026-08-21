@@ -35,6 +35,7 @@ class SPI:
     def __init__(self):
         self.written = 0
         self.locked = False
+        self.log = []          # the bytes themselves, for the windowed check
 
     def try_lock(self):
         self.locked = True
@@ -48,6 +49,7 @@ class SPI:
 
     def write(self, data):
         self.written += len(data)
+        self.log.append(bytes(data))
 
 
 def fake_digitalio():
@@ -56,6 +58,47 @@ def fake_digitalio():
     m.Pull = types.SimpleNamespace(UP="up", DOWN="down")
     m.DigitalInOut = Pin
     return m
+
+
+def check_region():
+    # The windowed refresh gathers the right pixels.
+    #
+    # Worth checking against arithmetic rather than against the panel: a wrong
+    # stride here draws a plausible-looking band of the wrong part of the
+    # screen, which is easy to mistake for a rendering bug somewhere else.
+    sys.modules["digitalio"] = fake_digitalio()
+    sys.path.insert(0, LIB)
+    for mod in ("uc8151badger",):
+        if mod in sys.modules:
+            del sys.modules[mod]
+    import uc8151badger
+    spi = SPI()
+    d = uc8151badger.UC8151Badger(spi, Pin(), Pin(), Pin(), Pin(True), rotation=3)
+    frame = bytearray((i * 7 + 3) & 0xFF for i in range(d.buffer_size))
+    spi.log = []
+    if not d.display_region(frame, 0, 16, d.landscape_width, 16):
+        print("  display_region refused a valid rectangle")
+        return 1
+    payload = None
+    for i, chunk in enumerate(spi.log):
+        if chunk == bytes([0x13]) and i + 1 < len(spi.log):
+            payload = spi.log[i + 1]
+            break
+    y0, y1 = 16, 32
+    px = d.height - d.landscape_width
+    cols = (y1 - y0) >> 3
+    bank = y0 >> 3
+    expect = bytearray()
+    for dx in range(d.landscape_width):
+        start = (px + dx) * d.bytes_per_row + bank
+        expect += frame[start:start + cols]
+    ok = payload is not None and bytes(expect) == bytes(payload)
+    cmds = [c[0] for c in spi.log if len(c) == 1]
+    left = 0x92 in cmds                      # PTOU: partial mode exited
+    print("  windowed refresh  %d of %d bytes (%.0f%%), gather %s, mode exited %s"
+          % (len(expect), d.buffer_size, 100.0 * len(expect) / d.buffer_size,
+             "correct" if ok else "WRONG", "yes" if left else "NO"))
+    return 0 if (ok and left) else 1
 
 
 def main():
@@ -109,6 +152,8 @@ def main():
         if len(ok) == 6 and spi.written < epd.buffer_size:
             print("       WARNING: less than one frame was sent")
             fails += 1
+
+    fails += check_region()
 
     print("\n%s" % ("%d drivers exercise clean" % len(cases) if not fails
                     else "%d DRIVER PROBLEM(S)" % fails))

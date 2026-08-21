@@ -89,7 +89,8 @@ def check_lazy():
     # point. Losing that is silent: code.py catches the ImportError and simply
     # reports the feature unavailable.
     bad = 0
-    for name, entry in (("gotoui", "run"), ("convertui", "convert")):
+    for name, entry in (("gotoui", "run"), ("convertui", "convert"),
+                        ("convboot", "run")):
         path = os.path.join(ROOT, "device", "lib", name + ".py")
         if not os.path.exists(path):
             print("  MISSING lazy module: %s" % name); bad += 1; continue

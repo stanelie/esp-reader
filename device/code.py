@@ -32,38 +32,16 @@ t_boot_start = time.monotonic()
 # ALLOCATED rather than allocated and given back. Choosing an EPUB records it
 # here and resets; this boot sees the record, converts, clears it and resets
 # again into the result.
-_NVM = getattr(microcontroller, "nvm", None)
-_PEND_AT = 256           # past the 210 bytes lib/bookmarks.py uses
-_PEND_MAGIC = 0xEC
-_PEND_MAX = 96
-
-
-def pending_convert():
-    try:
-        if _NVM is None:
-            return ""
-        head = bytes(_NVM[_PEND_AT:_PEND_AT + 2])
-        if head[0] != _PEND_MAGIC or not 0 < head[1] <= _PEND_MAX:
-            return ""
-        return bytes(_NVM[_PEND_AT + 2:_PEND_AT + 2 + head[1]]).decode()
-    except Exception:
-        return ""
-
-
-def set_pending_convert(path):
-    b = path.encode()[:_PEND_MAX]
-    _NVM[_PEND_AT:_PEND_AT + 2] = bytes([_PEND_MAGIC, len(b)])
-    _NVM[_PEND_AT + 2:_PEND_AT + 2 + len(b)] = b
-
-
-def clear_pending_convert():
-    try:
-        _NVM[_PEND_AT:_PEND_AT + 1] = bytes([0])
-    except Exception:
-        pass
-
-
-PENDING_CONVERT = pending_convert()
+# Only the read lives here - the rest is lib/convboot.py, compiled just on
+# the boots that need it. Offset 256 is clear of the 210 bytes bookmarks uses
+# and of the font choice at 512.
+PENDING_CONVERT = ""
+try:
+    _nv = getattr(microcontroller, "nvm", None)
+    if _nv is not None and _nv[256] == 0xEC and 0 < _nv[257] <= 96:
+        PENDING_CONVERT = bytes(_nv[258:258 + _nv[257]]).decode()
+except Exception:
+    PENDING_CONVERT = ""
 
 # --- SCARCE MEMORY IS CLAIMED BEFORE ANYTHING ELSE RUNS ---
 # Not "early in the boot" - first. Before the panel tables, before a single
@@ -1465,36 +1443,6 @@ def was_double_tap(release_ticks):
     _stashed_press = event
     return False
 
-# --- A CONVERSION BOOT ENDS HERE ---
-if PENDING_CONVERT:
-    log_step("Converting %s on a clean boot..." % PENDING_CONVERT)
-    # DEFLATE wants 32KB in one piece. Nothing has been carved out of this
-    # heap except one page buffer and the panel's own frame, so it is here to
-    # be had - which is the entire reason for booting specially.
-    try:
-        _zip_window = bytearray(32768)
-    except MemoryError:
-        _zip_window = None
-        log_step("Even on a clean boot there is no 32KB block.")
-    _made = None
-    try:
-        import convertui
-        _made = convertui.convert(PENDING_CONVERT, globals())
-    except Exception as _ce:
-        log_step("Conversion failed: %s" % _ce)
-    clear_pending_convert()
-    if _made:
-        try:
-            Bookmarks(MAX_BOOK_SLOTS).open(_made, list_books())
-        except Exception as _be:
-            log_step("Could not pre-select %s: %s" % (_made, _be))
-        log_step("Converted; restarting into %s" % _made)
-    else:
-        log_step("Conversion produced nothing; restarting.")
-    time.sleep(2)
-    microcontroller.reset()
-
-
 # --- WHICH BOOK, AND WHERE IN IT ---
 _turns_since_save = 0
 
@@ -2319,29 +2267,15 @@ def render_message(title, lines, out=None):
 
 
 def convert_epub(path):
-    # Queue `path` for conversion and restart. Never returns.
-    #
-    #     The extractor cannot run beside a loaded reader: it needs 32KB in one
-    #     piece for DEFLATE's window plus room to compile itself, and this heap
-    #     does not compact, so releasing the reader's memory first yields holes
-    #     rather than a block. Measured - that version got past the import and
-    #     died asking for 32768 bytes. Booting fresh with those allocations
-    #     never made is the difference.
+    # Queue `path` and restart, so the conversion gets a boot with none of the
+    # reader's memory allocated. lib/convboot.py explains why freeing it
+    # afterwards is not equivalent. Never returns.
     try:
-        set_pending_convert(path)
+        import convboot
     except Exception as e:
-        log_step("Could not queue %s for conversion: %s" % (path, e))
+        log_step("EPUB support unavailable (%s)" % e)
         return None
-    log_step("Queued %s; restarting to convert it." % path)
-    try:
-        display_page(render_message_into(_take_buf(), "Converting",
-                                         [book_title(path), "",
-                                          "Restarting to make room..."]),
-                     is_full=False)
-    except Exception:
-        pass
-    time.sleep(2)
-    microcontroller.reset()
+    convboot.queue(path, globals())
 
 
 def reflow_current_page():
@@ -2648,6 +2582,16 @@ def open_picker():
 
 
 # Boot setup
+# --- A CONVERSION BOOT ENDS HERE ---
+# Placed after the renderer, not before it: convboot draws progress screens
+# through display_page and render_message_into, and running it earlier failed
+# with KeyError('display_page') a second into every conversion - which looked
+# from the outside like the reader restarting and doing nothing.
+if PENDING_CONVERT:
+    import convboot
+    convboot.run(PENDING_CONVERT, globals())     # restarts; does not return
+
+
 woke_from_deep_sleep = alarm.wake_alarm is not None
 
 

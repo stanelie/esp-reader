@@ -46,6 +46,8 @@ _PLL = 0x30
 _TSE = 0x41
 _CDI = 0x50
 _TCON = 0x60
+_PTL = 0x90
+_PTIN = 0x91
 _PTOU = 0x92
 
 # PSR bits. The resolution field is bits 7:6 and it is not optional - setting
@@ -180,6 +182,9 @@ class UC8151Badger:
 
         self._busy_pending = False
         self._lut_speed = None          # which tables are currently uploaded
+        # Gather buffer for windowed refreshes. A full-width menu row is
+        # 296 strips of 2 bytes, so this is ~600 bytes, not a screen.
+        self._window_buf = None
         # Taken from the caller when offered. The reader claims every screen-sized
         # buffer before anything else runs, because this heap does not compact and
         # a 4736-byte block asked for late is the one that fails - see the claim
@@ -225,6 +230,88 @@ class UC8151Badger:
             self.spi.unlock()
         except Exception:
             pass
+
+    def display_region(self, new_buffer, x, y, w, h):
+        # Refresh only a rectangle, in LANDSCAPE coordinates. True if it drew.
+        #
+        #     `new_buffer` is a whole native frame, as display_partial takes, but
+        #     only the pixels inside the rectangle reach the glass. The caller must
+        #     therefore not have changed anything outside it, or previous_buffer
+        #     and the panel will disagree from here on.
+        #
+        #     This is what makes a menu feel immediate: moving a highlight one row
+        #     drives ~600 bytes instead of the whole 4736-byte frame, and the panel
+        #     spends its waveform on two rows rather than 128.
+        #
+        #     Returns False when the geometry is not supported, so callers can fall
+        #     back to a whole-frame partial rather than special-casing panels.
+        if self.rotation != 3:
+            return False                 # the mapping below assumes this one
+
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(self.landscape_width, x + w)
+        y1 = min(self.landscape_height, y + h)
+        if x1 <= x0 or y1 <= y0:
+            return False
+
+        # The panel addresses its short axis in banks of 8, so the rectangle is
+        # grown outward to whole banks rather than refusing awkward numbers.
+        y0 &= ~7
+        y1 = (y1 + 7) & ~7
+        if y1 > self.landscape_height:
+            y1 = self.landscape_height
+
+        # Landscape -> panel. The 296 axis runs backwards from landscape x, so
+        # the window starts at the far edge of the rectangle.
+        py, ph = y0, y1 - y0
+        px, pw = self.height - x1, x1 - x0
+        cols = ph >> 3
+        bank = py >> 3
+        need = pw * cols
+        if self._window_buf is None or len(self._window_buf) < need:
+            try:
+                self._window_buf = bytearray(need)
+            except MemoryError:
+                return False
+        out = self._window_buf
+
+        # A strided gather: the frame is already in the panel's orientation, so
+        # each strip of the window is one contiguous run inside it.
+        k = 0
+        for dx in range(pw):
+            start = (px + dx) * self.bytes_per_row + bank
+            out[k:k + cols] = new_buffer[start:start + cols]
+            k += cols
+
+        self._wait_ready()
+        self.send_command(_PSR)
+        self.send_data(_PSR_BASE | _LUT_REG)
+        self._upload_luts(_SPEED_PARTIAL, True)
+        self.send_command(_PON)
+        self.wait_busy()
+        self.powered = True
+
+        self.send_command(_PTIN)
+        self.send_command(_PTL)
+        self.send_data(bytes([
+            py & 0xFF, (y1 - 1) & 0xFF,
+            (px >> 8) & 0xFF, px & 0xFF,
+            ((px + pw - 1) >> 8) & 0xFF, (px + pw - 1) & 0xFF,
+            0x01,
+        ]))
+        self.send_command(_DTM2)
+        self.send_data(memoryview(out)[:need])
+        self.send_command(_DSP)
+        self.send_command(_DRF)
+        self.wait_busy()
+        # Leave partial mode, or every later refresh stays inside this window.
+        self.send_command(_PTOU)
+
+        self.previous_buffer[:] = new_buffer
+        if not self.keep_powered:
+            self.power_down()
+        return True
 
     def display_full(self, new_buffer):
         self._refresh(new_buffer, _SPEED_FULL, False)

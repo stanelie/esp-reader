@@ -115,6 +115,11 @@ def convert_epub(path):
                 pass
             if err is not None:
                 detail.append("raised: %s" % err)
+            # ...and to the console too. On a conversion boot the log file
+            # often cannot be written - that is frequently the failure itself -
+            # so the panel and the serial console are the only channels left.
+            for _line in detail:
+                _g("log_step")("convert: %s" % _line)
             _g("display_page")(_g("render_message_into")(_ui, "Conversion failed", [title, ""] + detail))
             time.sleep(6)
             return None
