@@ -141,7 +141,16 @@ def run(path, R):
                 except Exception:
                     pass
 
-        made = epub_xtract.convert_book(path, progress=progress,
+        # Absolute, always. The picker names a book the way it lists it -
+        # "alice.epub" in the root, "books/alice.epub" underneath - while
+        # epub_xtract.source_path() reads any name without a leading slash as
+        # being inside /books. So a root-level EPUB was looked for at
+        # /books/alice.epub, found missing, and the boot went quietly back to
+        # the book that was already open. convertui normalises this; this path
+        # bypasses convertui and did not.
+        source = path if path.startswith("/") else "/" + path
+        log("Converting from %s" % source)
+        made = epub_xtract.convert_book(source, progress=progress,
                                         keep_display=True,
                                         window=R.get("_zip_window"))
     except Exception as e:
