@@ -132,12 +132,27 @@ def run(path, R):
     try:
         import epub_xtract
 
+        # The first screen of a conversion boot must be a FULL refresh.
+        #
+        # A driver built moments ago starts with previous_buffer all white,
+        # because it has no way to know what is on the glass - but the panel is
+        # still holding the page that was there before the reset. A partial
+        # refresh diffs against white, so it draws the new ink and leaves
+        # everything else showing underneath. The reader's ordinary boot deals
+        # with this in show_restored_page(); this path had nothing.
+        #
+        # One full refresh fixes the reference for every partial after it, so
+        # only the first costs the extra ~2s.
+        drawn = []
+
         def progress(stage, done, total, name=""):
             if stage == "chapter":
                 try:
                     R["display_page"](R["render_message_into"](
                         R["_take_buf"](), "Converting",
-                        [R["book_title"](path), "", "%d of %d" % (done, total)]))
+                        [R["book_title"](path), "", "%d of %d" % (done, total)]),
+                        not drawn)
+                    drawn.append(1)
                 except Exception:
                     pass
 
