@@ -12,6 +12,8 @@
 # to a reader global - run_goto only returns the chosen percent, and the caller
 # does the jumping - so read access is all it needs.
 
+import time
+
 R = None
 
 
@@ -32,14 +34,14 @@ def render_goto_screen(pct, out=None):
     canvas = _g("begin_frame")()
 
     title = "Jump to"
-    _g("draw_text")(canvas, title, (WIDTH - _g("get_string_width")(title)) // 2, 0, color=0)
+    _g("draw_text")(canvas, title, (_g("WIDTH") - _g("get_string_width")(title)) // 2, 0, color=0)
 
     # No double-size any more: PropFont draws one size, and scaling a 1-bit
     # bitmap by doubling pixels looks worse than the plain glyphs do.
     big = "%d%%" % pct
-    _g("draw_text")(canvas, big, (WIDTH - _g("get_string_width")(big)) // 2, 22, color=0)
+    _g("draw_text")(canvas, big, (_g("WIDTH") - _g("get_string_width")(big)) // 2, 22, color=0)
 
-    bar_x, bar_y, bar_w, bar_h = 10, 66, WIDTH - 20, 12
+    bar_x, bar_y, bar_w, bar_h = 10, 66, _g("WIDTH") - 20, 12
     canvas.rect(bar_x, bar_y, bar_w, bar_h, 0)
     fill = int((bar_w - 4) * pct / 100.0)
     if fill > 0:
@@ -47,9 +49,9 @@ def render_goto_screen(pct, out=None):
 
     # Minus on the left, plus on the right, matching the bar underneath it.
     hint1 = "double-tap -%d%%    tap +%d%%" % (_g("GOTO_STEP"), _g("GOTO_STEP"))
-    _g("draw_text")(canvas, hint1, (WIDTH - _g("get_string_width")(hint1)) // 2, 86, color=0)
+    _g("draw_text")(canvas, hint1, (_g("WIDTH") - _g("get_string_width")(hint1)) // 2, 86, color=0)
     hint2 = "hold to open here"
-    _g("draw_text")(canvas, hint2, (WIDTH - _g("get_string_width")(hint2)) // 2, 101, color=0)
+    _g("draw_text")(canvas, hint2, (_g("WIDTH") - _g("get_string_width")(hint2)) // 2, 101, color=0)
 
     return _g("end_frame")(out)
 

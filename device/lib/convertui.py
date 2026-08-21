@@ -11,6 +11,8 @@
 # It takes the reader's globals rather than importing it back: a two-way import
 # between code.py and this would run the reader's module body a second time.
 
+import time
+
 R = None
 
 

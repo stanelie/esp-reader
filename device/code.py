@@ -308,6 +308,10 @@ PANELS = {
         # A single alarm slept the full deadline in isolation. The cost is that
         # BACK cannot wake the reader; it still works while awake.
         "single_wake_alarm": True,
+        # RP2040 light sleep is not the ESP32's busy-loop, so there is no
+        # reason to bail out to deep sleep early: rest for the full five
+        # minutes like the patched boards do.
+        "sleep_timeout": 300,
         "led": "GPIO25",              # USER_LED
         # VBAT_SENSE reads the cell through a divider that is always connected,
         # so there is no enable line to raise first.
@@ -611,7 +615,12 @@ LIGHT_SLEEP_TIMEOUT = 0.0
 # having is the deep one, so drop out to it quickly. REAL_LIGHT_SLEEP is not a
 # knob here: it comes from the BOARDS table, because it is a property of the
 # firmware and the firmware says which it is in its board name.
-SLEEP_TIMEOUT = 300 if REAL_LIGHT_SLEEP else 20
+# Seconds of light sleep before dropping to deep sleep. The 20s default is
+# for the stock ESP32 build, whose "light sleep" is a WFI busy-loop at ~43 mA -
+# there, resting is nearly as expensive as being awake, so it is worth paying a
+# reboot to escape quickly. That reasoning does not apply to a board whose
+# light sleep is real, so the panel profile can say otherwise.
+SLEEP_TIMEOUT = PANEL.get("sleep_timeout", 300 if REAL_LIGHT_SLEEP else 20)
 
 # Seconds after boot during which sleeping is refused. Zero, because the
 # usb_attached() guard below already does this job better: with a cable in at

@@ -14,6 +14,7 @@ because PICKER_ROWS is set by the function that had gone missing.
 A parse check cannot catch that. This can.
 """
 import ast
+import builtins
 import os
 import sys
 
@@ -41,6 +42,48 @@ ASSIGNMENTS = """
 """.split()
 
 
+def undefined_names(path):
+    # Every name a module loads must be bound somewhere in it. This is the
+    # check that catches a name left behind by moving code into a lazily
+    # imported module - gotoui.py shipped without `import time`, and the only
+    # symptom was a NameError the first time the jump-to screen was opened,
+    # long after every test had passed.
+    tree = ast.parse(open(path).read())
+    bound = set(dir(builtins))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bound.add(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+            a = getattr(n, "args", None)
+            if a:
+                for x in list(a.args) + list(a.posonlyargs) + list(a.kwonlyargs):
+                    bound.add(x.arg)
+                if a.vararg:
+                    bound.add(a.vararg.arg)
+                if a.kwarg:
+                    bound.add(a.kwarg.arg)
+        elif isinstance(n, ast.Import):
+            for al in n.names:
+                bound.add((al.asname or al.name).split(".")[0])
+        elif isinstance(n, ast.ImportFrom):
+            for al in n.names:
+                bound.add(al.asname or al.name)
+        elif isinstance(n, ast.Global):
+            bound.update(n.names)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, ast.comprehension):
+            for x in ast.walk(n.target):
+                if isinstance(x, ast.Name):
+                    bound.add(x.id)
+    out = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in bound:
+            out.setdefault(n.id, n.lineno)
+    return out
+
+
 def check_lazy():
     # The moved code still has to exist and still has to expose its entry
     # point. Losing that is silent: code.py catches the ImportError and simply
@@ -56,6 +99,14 @@ def check_lazy():
             print("  %s.py has no %s()" % (name, entry)); bad += 1
         else:
             print("  lazy module %-10s exports %s()" % (name, entry))
+        for who, line in sorted(undefined_names(path).items(), key=lambda x: x[1]):
+            print("  %s.py:%d undefined name %r" % (name, line, who))
+            bad += 1
+    for src in ("code.py",):
+        path = os.path.join(ROOT, "device", src)
+        for who, line in sorted(undefined_names(path).items(), key=lambda x: x[1]):
+            print("  %s:%d undefined name %r" % (src, line, who))
+            bad += 1
     return bad
 
 
@@ -97,7 +148,7 @@ def main():
         print("  globals declared in functions but never assigned at module "
               "level: %s" % ", ".join(undeclared))
 
-    bad = bool(missing_f or missing_a)
+    bad = bool(missing_f or missing_a) or bool(check_lazy())
     print("\n%s" % ("structure intact" if not bad else "STRUCTURE BROKEN"))
     return 1 if bad else 0
 

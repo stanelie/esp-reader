@@ -74,6 +74,16 @@ _HZ_100 = 0b00111010
 # of the computed tables and is what gives a full page its deepest black. A
 # computed speed-2 refresh looks correct on its own but is visibly greyer side
 # by side with an OTP one, which is what a full refresh is for.
+# TESTED AND WRONG - left here as a record so it is not tried again.
+#
+# The theory was that with DDX inverted the panel might select its transition
+# waveform from the raw RAM bits rather than the mapped colour, so a pixel
+# heading for black would get the black-to-white table and land grey. Swapping
+# the two tables to compensate garbles the screen outright, which says the
+# panel does apply DDX before choosing a LUT. The polarity handling is correct
+# and the contrast difference is somewhere else.
+_SWAP_TRANSITION_LUTS = False
+
 _SPEED_FULL = None
 _SPEED_PARTIAL = 4       # quick, and with WW/BB emptied, only changed pixels
 
@@ -301,6 +311,9 @@ class UC8151Badger:
         if self._lut_speed == key:
             return
         vcom, ww, bw, wb, bb = _build_luts(speed, no_flickering)
+        if _SWAP_TRANSITION_LUTS:
+            bw, wb = wb, bw
+            ww, bb = bb, ww
         for cmd, table in ((_LUT_VCOM, vcom), (_LUT_WW, ww), (_LUT_BW, bw),
                            (_LUT_WB, wb), (_LUT_BB, bb)):
             self.send_command(cmd)
