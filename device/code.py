@@ -1826,6 +1826,24 @@ def release_neighbours():
     _cache_released = True
 
 
+def reset_page_cache():
+    # Hand all three page buffers back, then forget them.
+    #
+    # Assigning None only drops the reference: the pool never sees the buffer
+    # again, and the next render asks the heap for a fresh 4736 bytes, which on
+    # the RP2040 fails. Every path that rebuilds the offsets list from scratch
+    # - a jump, a font change, opening another book, a long skip back - leaked
+    # the whole cache this way, so the first of them to run was also the last
+    # thing that worked.
+    global curr_buf, next_buf, prev_buf
+    _give_buf(curr_buf)
+    _give_buf(next_buf)
+    _give_buf(prev_buf)
+    curr_buf = None
+    next_buf = None
+    prev_buf = None
+
+
 def prefetch_neighbours(idx):
     global next_buf, prev_buf, _cache_released
     _cache_released = False
@@ -1971,11 +1989,12 @@ def turn_back(pages=1):
         shift_cache_backward(current_page_idx)
     else:
         current_page_idx = target
+        # Cache back to the pool BEFORE rendering, or reset_page_cache() hands
+        # back the very buffer the new page was just drawn into.
+        reset_page_cache()
         set_led(True)
         curr_buf = render_page_buffer(target)
         set_led(False)
-        next_buf = None
-        prev_buf = None
         display_page(curr_buf)
         prefetch_neighbours(target)
     save_position()
@@ -2205,8 +2224,7 @@ def jump_to_percent(pct):
         page_offsets = [land_off]
         current_page_idx = 0
 
-    next_buf = None
-    prev_buf = None
+    reset_page_cache()
 
     set_led(True)
     curr_buf = render_page_buffer(current_page_idx)
@@ -2264,8 +2282,7 @@ def reflow_current_page():
     offset = page_offsets[current_page_idx]
     page_offsets = [offset]
     current_page_idx = 0
-    next_buf = None
-    prev_buf = None
+    reset_page_cache()
     set_led(True)
     curr_buf = render_page_buffer(0)
     set_led(False)
@@ -2291,8 +2308,7 @@ def switch_to_book(path):
 
     page_offsets = [offset]
     current_page_idx = 0
-    next_buf = None
-    prev_buf = None
+    reset_page_cache()
 
     set_led(True)
     curr_buf = render_page_buffer(0)
