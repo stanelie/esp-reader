@@ -27,16 +27,27 @@ OUT="$(dirname "$0")/../device/fonts"
 # wider and sturdier on purpose, and that costs no HEIGHT - which matters,
 # because height is what costs a line on a 128px panel.
 #
-# 9 is measured, not chosen for looks. Against the hand-built font this is
-# meant to match, over a 130-character sample: opsz 13 gives 819px of line and
-# 3253 ink pixels (too light), opsz 7 gives 888px and 3417 (dark enough but
-# 4.6% wider, which costs a word per line), opsz 9 gives 849px and 3355 - the
-# same line width to the pixel, within 2% of the ink.
+# 11 is measured, and the deciding measurement is stem consistency, not ink.
 #
-# Weight stays 350. Raising it to 400 does add ink, but by thickening stems to
-# 2px: the 1px-stem share falls from 60% to 43%, and the reference font sits at
-# 65%. Its extra darkness comes from width, not from heavier strokes.
-python3 "$(dirname "$0")/build_pf.py" "$LIT"    "$OUT/literata.pf"        13 mono 350 15 9  # 14
+# Literata's optical-size axis draws small sizes wider and sturdier, which
+# costs no height - and height is what costs a line on a 128px panel. But the
+# hinted rasteriser rounds each stem independently, so as the face gets sturdier
+# individual glyphs tip from a 1px stem to 2px while their neighbours do not,
+# and a single thick `b` or `J` in a page of prose is obvious.
+#
+# Swept opsz 8-12 x weight 350-395, over a 130-character sample. Exactly one
+# combination has NO 2px stems while still fitting 11 words to the line:
+#
+#   opsz 11 w350   ink 3259   width 838   2px stems: none      <- this
+#   opsz  8 w350   ink 3376   width 882   2px stems: J
+#   opsz  9 w350   ink 3355   width 849   2px stems: b 1 J
+#   opsz 12 w365   ink 3321   width 837   2px stems: p
+#
+# For reference the hand-built font this is meant to match measures 3412 ink at
+# 849px and has a 2px `9`. So this is ~4% lighter than that one and more
+# consistent than it. Contrast on the panel is set by the driver's waveform -
+# full refreshes use the OTP table - not by squeezing ink out of the face.
+python3 "$(dirname "$0")/build_pf.py" "$LIT"    "$OUT/literata.pf"        13 mono 350 15 11  # 14
 python3 "$(dirname "$0")/build_pf.py" "$LIT"    "$OUT/literata-large.pf"  15 mono 400 16   # 16
 python3 "$(dirname "$0")/build_pf.py" "$LIT"    "$OUT/literata-larger.pf" 18 mono 400 19   # 19
 python3 "$(dirname "$0")/build_pf.py" "$DEJAVU" "$OUT/dejavu.pf"          11 mono 400 15   # 13
