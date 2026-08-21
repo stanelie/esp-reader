@@ -21,6 +21,19 @@ ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 FONTS = os.path.join(ROOT, "device", "fonts")
 PROBES = "ABegoSnh"
 
+# How many enclosed white regions each letter must have. This is the check for
+# a stroke with a hole in it: when the bowl of an `o` breaks by one pixel the
+# counter drains into the surrounding white and the count goes 1 -> 0. Nothing
+# else here catches that - the glyph still has ink in the right rows, the right
+# stem width and the right advance, and it still reads as "not gibberish".
+#
+# Only letters whose topology every Latin face agrees on. `g` is out because
+# DejaVu's is single-storey and Literata's is double, `Q` because the tail may
+# or may not cross the bowl, `a` because at 13px the arch legitimately closes
+# against the stem, and `4`/`6`/`9` because open and closed forms both exist.
+CLOSED = {"o": 1, "b": 1, "d": 1, "p": 1, "q": 1, "e": 1,
+          "O": 1, "D": 1, "B": 2, "P": 1, "R": 1, "0": 1, "8": 2}
+
 
 def load(path):
     d = open(path, "rb").read()
@@ -47,6 +60,60 @@ def bitmap(font, ch):
     start = data + off
     return ["".join("#" if (d[start + y * rb + (x >> 3)] >> (7 - (x & 7))) & 1
                     else "." for x in range(bw)) for y in range(box_h)]
+
+
+def counters(rows):
+    """Enclosed white regions: flood the outside, count what white is left.
+
+    A one-pixel margin is added all round first so a counter that touches the
+    glyph box edge is not treated as enclosed. Background is flooded 4-connected
+    against 8-connected ink, which is the pairing that makes a diagonal run of
+    pixels count as a wall - otherwise every diagonal stroke leaks.
+    """
+    w = len(rows[0]) + 2
+    g = [[False] * w]
+    g += [[False] + [c == "#" for c in r] + [False] for r in rows]
+    g += [[False] * w]
+    h = len(g)
+    seen = [[False] * w for _ in range(h)]
+    stack = [(0, 0)]
+    seen[0][0] = True
+    while stack:
+        x, y = stack.pop()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h and not g[ny][nx] and not seen[ny][nx]:
+                seen[ny][nx] = True
+                stack.append((nx, ny))
+    n = 0
+    for y in range(h):
+        for x in range(w):
+            if not g[y][x] and not seen[y][x]:
+                n += 1
+                stack = [(x, y)]
+                seen[y][x] = True
+                while stack:
+                    cx, cy = stack.pop()
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = cx + dx, cy + dy
+                        if (0 <= nx < w and 0 <= ny < h
+                                and not g[ny][nx] and not seen[ny][nx]):
+                            seen[ny][nx] = True
+                            stack.append((nx, ny))
+    return n
+
+
+def broken_bowls(font):
+    """Letters whose enclosed-region count is not what the letter has."""
+    bad = []
+    for ch, want in CLOSED.items():
+        rows = bitmap(font, ch)
+        if rows is None:
+            continue
+        got = counters(rows)
+        if got != want:
+            bad.append("%s=%d(want %d)" % (ch, got, want))
+    return bad
 
 
 def stem_widths(font, chars="nhmuildbpr"):
@@ -118,16 +185,20 @@ def main():
         # more variation in stroke width, so the bar has to clear it.
         at_allowed = spread.get(allowed, 0.0)
         stem_ok = stem <= allowed and at_allowed >= 0.55
-        ok = ok and stem_ok
+        bad = broken_bowls(font)
+        ok = ok and stem_ok and not bad
         fails_stem = not stem_ok
         print("%-20s box_h %2d baseline %2d space %d, %d glyphs, %3d rows, "
               "%3.0f%% uniform, stem %dpx (<=%d), %3.0f%% at that width  %s"
               % (name, box_h, baseline, space, len(recs), total, frac * 100,
                  stem, allowed, at_allowed * 100,
-                 "ok" if ok else ("TOO HEAVY" if fails_stem else "GIBBERISH")))
+                 "ok" if ok else ("TOO HEAVY" if fails_stem
+                                  else ("OPEN BOWLS: " + " ".join(bad)) if bad
+                                  else "GIBBERISH")))
         fails += not ok
         if show or not ok:
-            for ch in "AE":
+            for ch in ("AE" if not bad else "".join(
+                    sorted({b.split("=")[0] for b in bad}))[:4]):
                 for r in bitmap(font, ch) or []:
                     print("      " + r)
                 print()

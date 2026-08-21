@@ -146,11 +146,24 @@ and survives a flat battery.
 arguments. Aim for a glyph box of 13-14 rows to get 9 lines on the E290, and
 run `tools/tests/test_pf.py` afterwards.
 
-Watch the stem weight. `build_pf.py` rasterises greyscale and thresholds it,
-and at the default 108 a 13px stem straddling two columns passes in both, so
-every vertical comes out 2px and the face reads as heavy. 150 is right for
-these sizes; `tests/test_pf.py` measures it over lowercase and fails the font
-if too few stems land at the width the size calls for.
+Build them with `tools/build_fonts.sh`, which records the exact arguments -
+the first set was built by hand without recording them, and recovering the
+arguments later meant brute-forcing them against the shipped bytes.
+
+Rasterise through FreeType's monochrome hinted renderer (`mono`), not by
+thresholding a greyscale render. Any fixed threshold is wrong somewhere: at
+13px, low enough to keep the bowl of an `o` connected is also low enough to
+smear every stem to 2px, and there is no value in between that does both. The
+default font shipped at threshold 150 with 15 letters whose strokes had holes
+in them - `o`, `b`, `e`, `p`, `O` and more - because a broken bowl looks fine
+by every metric the tests had: right ink, right stem width, right advance. The
+hinted rasteriser has dropout control, which is precisely the guarantee that a
+thin stroke still comes out as a connected run.
+
+`tests/test_pf.py` checks two things that catch opposite failures: stem width
+over lowercase (a font whose verticals are all 2px reads as heavy), and the
+number of enclosed white regions per letter, which goes 1 to 0 the moment a
+bowl breaks.
 
 ## Hyphenation
 
