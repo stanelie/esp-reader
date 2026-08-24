@@ -344,14 +344,27 @@ PANELS = {
         # Arm ONE wake alarm, not two. Measured on this board: with alarms on
         # both buttons, light sleep returns instantly over and over - 21 such
         # phantom wakes in a three-press session - and each one tears down the
-        # display and the keypad, so a press landing in that window is lost.
-        # A single alarm slept the full deadline in isolation. The cost is that
-        # BACK cannot wake the reader; it still works while awake.
+        # keypad, so a press landing in that window is lost. A single alarm
+        # slept the full deadline in isolation. The cost is that BACK cannot
+        # wake the reader; it still works while awake.
         "single_wake_alarm": True,
         # RP2040 light sleep is not the ESP32's busy-loop, so there is no
         # reason to bail out to deep sleep early: rest for the full five
         # minutes like the patched boards do.
         "sleep_timeout": 300,
+        # ESP32 light sleep really does power-gate peripherals, which is why
+        # teardown_display()/build_display() rebuild the panel from scratch
+        # around it - see the comment above build_display(). The RP2040's
+        # alarm.light_sleep_until_alarms() is WFI-based instead: it halts the
+        # core clock but does not power-gate anything, so SPI and GPIO state
+        # (including the panel's RST line) survive it untouched. Tearing the
+        # panel down anyway meant every light-sleep wake drove a hardware RST
+        # pulse and a full booster/VCOM re-init right before the next refresh
+        # - and that refresh is always partial-only on this path, which this
+        # panel family renders visibly paler right off a cold reset. Left
+        # powered across light sleep, the next partial matches one taken
+        # while awake.
+        "display_survives_light_sleep": True,
         "led": "GPIO25",              # USER_LED
         # VBAT_SENSE reads the cell through a divider that is always connected,
         # so there is no enable line to raise first.
@@ -661,6 +674,11 @@ SLEEP_TIMEOUT = PANEL.get("sleep_timeout", 300 if REAL_LIGHT_SLEEP else 20)
 # fast enough to race USB enumeration (currently ~4.5 s of boot vs well under
 # 1 s to enumerate, so there is ample margin).
 BOOT_GRACE_SECONDS = 0
+
+# Whether the panel can stay powered and attached across a light sleep rather
+# than being torn down and rebuilt around it - see the panel profile entry
+# for why this differs by board.
+DISPLAY_SURVIVES_LIGHT_SLEEP = PANEL.get("display_survives_light_sleep", False)
 
 # Getting the drive (and the REPL) back needs no special mode: a light sleep
 # gates the USB peripheral, but any wake from DEEP sleep is a full reboot and
@@ -2300,7 +2318,8 @@ def enter_light_sleep():
 
     # Deliberately no sleep screen. The page is already on the panel and
     # e-paper holds it without power, so the fastest wake is to leave it be.
-    teardown_display()
+    if not DISPLAY_SURVIVES_LIGHT_SLEEP:
+        teardown_display()
     keys.deinit()
     wait_buttons_released()
 
@@ -2397,11 +2416,13 @@ def enter_light_sleep():
     build_keys()
     drain_events()
 
-    build_display()
-    # The rebuilt driver assumes a blank panel. Tell it what is actually up
-    # there, or the next partial refresh smears against the wrong reference.
-    if curr_buf is not None:
-        epd.set_previous(curr_buf)
+    if not DISPLAY_SURVIVES_LIGHT_SLEEP:
+        build_display()
+        # The rebuilt driver assumes a blank panel. Tell it what is actually
+        # up there, or the next partial refresh smears against the wrong
+        # reference.
+        if curr_buf is not None:
+            epd.set_previous(curr_buf)
 
     return key, held_ms, release_ticks
 
