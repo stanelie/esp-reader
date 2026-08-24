@@ -77,10 +77,10 @@ _HZ_100 = 0b00111010
 # computed speed-2 refresh looks correct on its own but is visibly greyer side
 # by side with an OTP one, which is what a full refresh is for.
 _SPEED_FULL = None
-# 3, not 4: measured on the panel as the densest partial black that is
-# still quiet. The waveform is longer, so a page turn costs a little more
-# time for a visibly darker result.
-_SPEED_PARTIAL = 3
+# Measured on the panel as the densest partial black that is still quiet.
+# The waveform is longer, so a page turn costs a little more time for a
+# visibly darker result.
+_SPEED_PARTIAL = 4
 
 
 def _lut_row(lut, row, pat, dur, rep):
@@ -132,6 +132,7 @@ def _build_luts(speed, no_flickering):
         for i in range(42):
             ww[i] = 0
             bb[i] = 0
+        _lut_row(bb, 0, 0b10_01_10_01, [0, 2, 0, 0], 1)   # denser black
     return vcom, ww, bw, wb, bb
 
 
@@ -184,17 +185,20 @@ class UC8151Badger:
         # block at the top of code.py.
         if previous is not None:
             self.previous_buffer = previous
-            # Chunked, not a per-byte loop: 4736 iterations of Python is ~5ms
-            # of boot for no reason. Not b"\xFF" * buffer_size either - that
-            # allocates a second screen-sized object, which is the thing this
-            # whole arrangement exists to avoid.
-            _ff = b"\xFF" * 64
-            for _i in range(0, self.buffer_size - 63, 64):
-                self.previous_buffer[_i:_i + 64] = _ff
-            for _i in range((self.buffer_size // 64) * 64, self.buffer_size):
-                self.previous_buffer[_i] = 0xFF
         else:
-            self.previous_buffer = bytearray(b"\xFF" * self.buffer_size)
+            self.previous_buffer = bytearray(self.buffer_size)
+
+        # Chunked, not a per-byte loop: 4736 iterations of Python is ~5ms of
+        # boot for no reason. Cheap chunked fill - never allocate a second
+        # full-size temporary. (bytearray(b"\xFF" * buffer_size) used to do
+        # exactly that on the freshly-allocated path above, which was the
+        # whole thing this arrangement exists to avoid.)
+        _ff = b"\xFF" * 64
+        for _i in range(0, self.buffer_size - 63, 64):
+            self.previous_buffer[_i:_i + 64] = _ff
+        for _i in range((self.buffer_size // 64) * 64, self.buffer_size):
+            self.previous_buffer[_i] = 0xFF
+
         self.reset()
         self._init_panel()
 
@@ -294,13 +298,6 @@ class UC8151Badger:
             0x01,
         ]))
         self.send_command(_DTM2)
-        # Exactly one frame, never more. The reader claims its page buffers
-        # before it knows which board this is, so it sizes them for the largest
-        # panel it supports - a buffer handed here can be bigger than this
-        # panel's frame. Sending the surplus pushes it into the panel's RAM
-        # past the end of the image, where it wraps onto the opposite edge:
-        # 736 spare bytes is 46 rows of 250, which showed up as a blank stripe
-        # down one sixth of the E213.
         self.send_data(memoryview(out)[:need])
         self.send_command(_DSP)
         self.send_command(_DRF)
@@ -426,9 +423,9 @@ class UC8151Badger:
         # DTM1 is what is on the glass, DTM2 what should be. The panel drives
         # only the pixels where they differ, when WW and BB are empty.
         self.send_command(_DTM1)
-        self.send_data(memoryview(self.previous_buffer)[:self.buffer_size])
+        self.send_data(self.previous_buffer)
         self.send_command(_DTM2)
-        self.send_data(memoryview(new_buffer)[:self.buffer_size])
+        self.send_data(new_buffer)
         self.send_command(_DSP)
 
         self.send_command(_DRF)
