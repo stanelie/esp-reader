@@ -2084,14 +2084,13 @@ def run_picker():
 
     # Back, Jump-to and Fonts ride in as the first rows, all only with a book
     # actually open - there is nowhere to go back to and nothing to seek
-    # within otherwise. Jump-to starts selected, not Back, since seeking
-    # within the book you are reading is the commoner reason to open this
-    # menu; the book list is a tap or two down. Back sits one row above it -
-    # a single BACK-button press away, matching what BACK does everywhere
-    # else in the reader - for when the menu was opened by mistake.
+    # within otherwise. Back starts selected: a menu opened by accident (or
+    # just to check something) is closed again with a single tap of NEXT,
+    # matching how doing nothing already leaves the book unchanged. Jump-to
+    # and Fonts are one and two rows down.
     if FILE_SIZE > 0:
         names = [BACK_ROW, GOTO_ROW, FONTS_ROW] + names
-        sel = 1
+        sel = 0
     else:
         names = [FONTS_ROW] + names
         sel = names.index(current_file) if current_file in names else 0
