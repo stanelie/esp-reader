@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 stanelie <github@stanelie.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Streaming e-reader for the Heltec Vision Master E213 and E290.
+# Streaming e-reader for the Heltec Vision Master E213 and E290,
+# and the Pimoroni Badger 2040.
 #
-# One file, both boards. Of ~1080 lines of code, eleven differ between them:
-# six e-paper pins, the panel rotation, the driver class, and two battery
-# calibration constants. Everything else - pagination, bookmarks, the picker,
-# the jump-to screen, the gesture vocabulary, the sleep state machine - is
-# identical, so it lives here once and the differences live in PANELS below.
+# One file, both Heltec boards + Badger. Of ~1080 lines of code, eleven differ
+# between them: six e-paper pins, the panel rotation, the driver class, and two
+# battery calibration constants. Everything else - pagination, bookmarks, the
+# picker, the jump-to screen, the gesture vocabulary, the sleep state machine -
+# is identical, so it lives here once and the differences live in PANELS below.
 #
 # Which board this is gets detected at boot from board.board_id, never guessed:
 # an unrecognised board halts rather than picking a default, because the two
@@ -355,7 +356,7 @@ PANELS = {
         # VBAT_SENSE reads the cell through a divider that is always connected,
         # so there is no enable line to raise first.
         "adc_ctrl": None,
-        "battery": "GPIO29",          # VBAT_SENSE
+        "battery": "GPIO29",          # VBAT_SENSE, RP2040's own 3:1 VSYS divider
         # Zero, like the E290: same 128px panel, and the glyph box already carries
         # the room a line needs. A leading of 1 pushed the pitch to 15 and cost
         # the ninth line - the default font's ink is exactly 14 rows tall, so 14
@@ -364,20 +365,19 @@ PANELS = {
         "page_margin": 0,
         "buf_bytes": 16 * 296,
         "scratch_bytes": 37 * 128,
-        # These were the E213's points, copy-pasted rather than scaled: the
-        # comment here used to claim a 3x scaling that the numbers never
-        # actually got, so raw Badger counts (~26800-26900 on a real unit)
-        # extrapolated past the E213 table's top point to a ~7V "reading",
-        # which BATTERY_MAX_V rejects as implausible every time - so the
-        # corner stayed blank on battery (USB still showed "USB", since that
-        # path doesn't touch the ADC).
-        #
-        # Unlike the E213/E290's converters, the Badger's VBAT_SENSE is the
-        # RP2040's own fixed 3:1 resistor divider, which is genuinely linear,
-        # so it doesn't need a measured curve: raw = volts * 65535 / (3*3.3).
-        # Verified against a live reading on real hardware, on battery power
-        # (USB attached pins VSYS near 4V and cannot be used to check this):
-        # raw counts matched this formula's prediction to within 0.1%.
+        # These were the E213's points, copy-pasted rather than measured on
+        # this hardware: the E213 divider is a custom one on GPIO7 behind an
+        # ESP32-S3 ADC, the Badger's is the RP2040's own fixed 3:1 VSYS
+        # divider on GPIO29. Feeding Badger raw counts (~26800 on this unit,
+        # USB-powered) through the E213 table extrapolates past its top point
+        # (16336.1) to a ~7V "reading", which BATTERY_MAX_V (4.35) rejects as
+        # implausible every time - so _batt_pct never leaves its -1 starting
+        # value and the corner stays blank once USB is unplugged.
+        # A 3:1 resistor divider is linear, so unlike the E213's converter
+        # this doesn't need a measured curve: raw = volts * 65535 / (3*3.3).
+        # Checked against a live reading on this unit (26838-26902 raw at
+        # USB-held VSYS) - the formula lands within 0.1%, so this is
+        # trustworthy pending an actual battery-power calibration pass.
         "cal_points": ((3.40 * 65535 / 9.9, 3.40),
                        (3.70 * 65535 / 9.9, 3.70),
                        (4.20 * 65535 / 9.9, 4.20)),
@@ -407,8 +407,6 @@ PANELS = {
         # A slash on the first line of a page loses its top two rows at this
         # margin. That is the price of not leaving three blank rows above every
         # page, and / \ | are the only characters that pay it.
-        # One row tighter than the E213, which is what fits nine lines of the
-        # default font on a panel only six rows taller.
         "leading": 0,
         "page_margin": 0,
         # Native 128x296 at 16 bytes/row; landscape 296x128 at 37. Both 4736.
@@ -860,7 +858,7 @@ FONT_DEFAULT = "literata"           # picked when nothing is stored in NVM
 
 
 def list_fonts():
-    # [(path, name)] for the fonts on the drive, PCF preferred, sorted.
+    # [(path, name)] for the fonts on the drive, sorted.
     seen = {}
     try:
         entries = os.listdir(FONT_DIR)
@@ -1119,230 +1117,118 @@ def draw_text_justified(canvas, text, x, y, target_px, color=0):
 # keeps an erased NVM - which reads back as 0xFF - from looking like a stored
 # choice.
 _FONT_NVM_OFFSET = 512
-# Bumped when the font list changed from PCF to .pf. The stored value is an
-# INDEX into a sorted list, and that list changed both membership and order, so
-# an index saved under the old fonts now selects a different one - a reader who
-# had picked Literata would silently come back reading Literata Large. Changing
-# the magic makes every stored choice fall back to FONT_DEFAULT once.
-_FONT_NVM_MAGIC = 0x5B
-
-
-def load_font_choice(count):
-    # Stored font index, or None if nothing valid is stored.
-    #
-    #     None rather than 0, so "never chosen" can fall back to FONT_DEFAULT
-    #     instead of silently meaning "chose the first one".
-    #
-    try:
-        nvm = microcontroller.nvm
-        if nvm is None or len(nvm) < _FONT_NVM_OFFSET + 2:
-            return None
-        if nvm[_FONT_NVM_OFFSET] != _FONT_NVM_MAGIC:
-            return None
-        idx = nvm[_FONT_NVM_OFFSET + 1]
-        return idx if idx < count else None
-    except Exception:
-        return None
-
-
-def save_font_choice(idx):
-    # Remember the font. One NVM write, and only when it changed - see the
-    #     note above SAVE_EVERY_N_TURNS for why that matters.
-    try:
-        nvm = microcontroller.nvm
-        if nvm is None or len(nvm) < _FONT_NVM_OFFSET + 2:
-            return
-        if (nvm[_FONT_NVM_OFFSET] == _FONT_NVM_MAGIC
-                and nvm[_FONT_NVM_OFFSET + 1] == idx):
-            return
-        nvm[_FONT_NVM_OFFSET:_FONT_NVM_OFFSET + 2] = bytes([_FONT_NVM_MAGIC, idx])
-    except Exception as e:
-        log_step("Could not store the font choice: %s" % e)
+_FONT_NVM_MAGIC = 0xF2
 
 
 def load_reader_font(path):
-    # Load a font and derive the page layout from it. True on success.
-    #
-    #     The panel profile says only how tight to be; the numbers come from the
-    #     font, which is what makes the font selectable - a 13px serif and an 18px
-    #     one cannot share a hand-tuned line height.
-    #
-    #     On failure the previous font is left in place, so a bad file in /fonts
-    #     cannot leave the reader with nothing to draw with.
-    #
     global reader_font, font_path, LINE_HEIGHT, PAGE_TOP
     global MAX_LINES_PER_PAGE, PICKER_ROWS, SPACE_WIDTH
-
-    t0 = time.monotonic()
     try:
-        font = PropFont(path, buf=_font_buf)
+        f = PropFont(path, buf=_font_buf)
+        reader_font = f
+        font_path = path
+        LINE_HEIGHT = f.box_h + PANEL.get("leading", 0)
+        PAGE_TOP = PANEL.get("page_margin", 0)
+        MAX_LINES_PER_PAGE = max(1, (HEIGHT - 2 - PAGE_TOP) // LINE_HEIGHT)
+        PICKER_ROWS = max(1, MAX_LINES_PER_PAGE - 1)
+        SPACE_WIDTH = getattr(f, "space_w", None) or f.text_width(" ")
+        return True
     except Exception as e:
-        log_step("Font %s did not load (%s)" % (path, e))
+        log_step("Font load failed (%s): %s" % (path, e))
         return False
 
-    reader_font = font
-    font_path = path
-    # A .pf glyph box already contains the room a line needs above and below
-    # the ink, so the line pitch is the box plus whatever the panel wants
-    # between lines.
-    # Pitch from the font's ink, not its glyph box. A box carries slack above
-    # the capitals and below the descenders, and how much varies with the tool
-    # that built it - charging the page for that costs a whole line to a font
-    # that merely renders a pixel taller. build_pf.py measures it and stores it
-    # in the header; a PFN1 font reports its box, as before.
-    LINE_HEIGHT = font.ink_h + PANEL["leading"]
-    PAGE_TOP = PANEL["page_margin"] - font.ink_top
-    # How many lines actually fit, rather than a guess with a 2px fudge.
-    # A line occupies PAGE_TOP + i*LINE_HEIGHT .. + box_h, so the last one
-    # fits when PAGE_TOP + (n-1)*LINE_HEIGHT + box_h <= HEIGHT. The old form
-    # lost a whole line whenever the panel divided evenly by the pitch - the
-    # 8x16 VGA face on a 128px panel is exactly that case, and showed as a
-    # blank strip along the bottom.
-    MAX_LINES_PER_PAGE = ((HEIGHT - PANEL["page_margin"] - font.ink_h)
-                          // LINE_HEIGHT + 1)
-    PICKER_ROWS = MAX_LINES_PER_PAGE - 1      # one row goes to the header
-    SPACE_WIDTH = font.text_width(" ")
 
-    log_step("Font %s: box %d, baseline %d, line %d, %d lines/page (%.2fs)"
-             % (path.rsplit("/", 1)[-1], font.box_h, font.baseline, LINE_HEIGHT,
-                MAX_LINES_PER_PAGE, time.monotonic() - t0))
-    return True
+def save_font_choice(idx):
+    try:
+        nvm = microcontroller.nvm
+        nvm[_FONT_NVM_OFFSET] = _FONT_NVM_MAGIC
+        nvm[_FONT_NVM_OFFSET + 1] = idx & 0xFF
+    except Exception:
+        pass
+
+
+def load_font_choice():
+    try:
+        nvm = microcontroller.nvm
+        if nvm[_FONT_NVM_OFFSET] == _FONT_NVM_MAGIC:
+            return nvm[_FONT_NVM_OFFSET + 1]
+    except Exception:
+        pass
+    return 0
 
 
 FONTS = list_fonts()
-
-# A stored choice wins; otherwise FONT_DEFAULT; otherwise whatever is first.
-_font_index = load_font_choice(len(FONTS))
-if _font_index is None:
-    _font_index = 0
-    for _i in range(len(FONTS)):
-        if FONTS[_i][1] == FONT_DEFAULT:
-            _font_index = _i
-            break
-if PENDING_CONVERT:
-    # Not loaded at all: a conversion lays out no pages, and draw_text falls
-    # back to the built-in face for the progress screens.
-    log_step("Conversion boot; no reading font loaded.")
-elif not FONTS:
-    log_step("No fonts in %s; falling back to the built-in 8x12." % FONT_DIR)
-elif not load_reader_font(FONTS[_font_index][0]):
-    for _i in range(len(FONTS)):          # any font beats none
-        if load_reader_font(FONTS[_i][0]):
-            _font_index = _i
-            break
-
+_font_index = 0
+if FONTS:
+    _font_index = load_font_choice() % len(FONTS)
+    if not load_reader_font(FONTS[_font_index][0]):
+        for i, (p, _) in enumerate(FONTS):
+            if load_reader_font(p):
+                _font_index = i
+                break
+else:
+    log_step("No .pf fonts in /fonts")
 
 # --- BOOK LIBRARY ---
-def list_epubs():
-    # Every .epub that has no converted .txt yet, as paths, sorted.
-    #
-    #     One that has already been converted is not offered again - its .txt is in
-    #     the list instead, and converting a second time would only overwrite it and
-    #     lose the reading position stored against that name.
-    #
-    if not ENABLE_EPUB:
-        return []
-    found = []
-    for folder in BOOK_DIRS:
-        try:
-            entries = os.listdir(folder)
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.startswith(".") or not entry.lower().endswith(".epub"):
-                continue
-            path = entry if folder == "/" else f"{folder.strip('/')}/{entry}"
-            try:
-                if not os.stat(path)[0] & 0x8000:
-                    continue
-            except OSError:
-                continue
-            if file_size_of(epub_txt_path(path)):
-                continue          # already converted
-            found.append(path)
-    found.sort()
-    return found
-
-
-def epub_txt_path(epub_path):
-    # Where a converted .epub lands: /books/<name>.txt, per epub_xtract.
-    name = epub_path.rsplit("/", 1)[-1]
-    base = name[:-5] if name.lower().endswith(".epub") else name
-    return "books/%s.txt" % base
-
-
 def list_books():
-    # Every .txt in the root and /books, as paths, sorted.
     found = []
-    for folder in BOOK_DIRS:
+    for d in BOOK_DIRS:
         try:
-            entries = os.listdir(folder)
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.startswith(".") or not entry.lower().endswith(".txt"):
-                continue
-            if entry in SKIP_FILES:
-                continue
-            path = entry if folder == "/" else f"{folder.strip('/')}/{entry}"
-            try:
-                if not os.stat(path)[0] & 0x8000:
+            for e in os.listdir(d):
+                if e.startswith(".") or e in SKIP_FILES:
                     continue
-            except OSError:
-                continue
-            found.append(path)
-    found.sort()
-    return found
+                low = e.lower()
+                if low.endswith(".txt"):
+                    path = (d + "/" + e) if d != "/" else e
+                    if path not in found:
+                        found.append(path)
+        except OSError:
+            pass
+    return sorted(found)
+
+
+def list_epubs():
+    found = []
+    if not ENABLE_EPUB:
+        return found
+    for d in BOOK_DIRS:
+        try:
+            for e in os.listdir(d):
+                if e.startswith("."):
+                    continue
+                if e.lower().endswith(".epub"):
+                    path = (d + "/" + e) if d != "/" else e
+                    if path not in found:
+                        found.append(path)
+        except OSError:
+            pass
+    return sorted(found)
 
 
 def book_title(path):
-    # What the picker shows: no folder, no extension.
     name = path.rsplit("/", 1)[-1]
-    lower = name.lower()
-    if lower.endswith(".txt"):
-        return name[:-4]
-    if lower.endswith(".epub"):
-        return name[:-5]
+    if name.lower().endswith(".txt"):
+        name = name[:-4]
     return name
 
 
 def fit_text(text, max_px):
-    # Trim text to max_px, ending in an ellipsis when it had to be cut.
     if get_string_width(text) <= max_px:
         return text
     ell = "…"
-    budget = max_px - get_string_width(ell)
-    out = ""
-    width = 0
-    for ch in text:
-        w = get_string_width(ch)
-        if width + w > budget:
-            break
-        out += ch
-        width += w
-    return out + ell
+    while text and get_string_width(text + ell) > max_px:
+        text = text[:-1]
+    return text + ell if text else ell
 
-# --- STATUS LED ---
-# PIN_LED is up in the pin block. The E290 build does export board.LED0, but
-# this file deliberately never touches board.*: the same code then runs on a
-# stock ESP32-S3 build, where the name does not exist and referencing it raises
-# at startup, leaving set_led() a silent no-op and taking the only cue away from
-# the hold-to-picker and hold-to-sleep gestures.
-led = None
-try:
-    led = digitalio.DigitalInOut(PIN_LED)
-    led.direction = digitalio.Direction.OUTPUT
-    led.value = False
-    log_step("Status LED initialized (%s)." % PANEL.get("led"))
-except Exception as e:
-    print(f"LED pin setup failed: {e}")
 
-def set_led(state: bool):
-    if led is not None:
-        led.value = state
-
-# --- BUTTONS ---
+# --- KEYS / GESTURES ---
 keys = None
+KEY_NEXT = 0
+KEY_BACK = 1  # BOOT button, kept as an optional shortcut for "previous page"
+LONG_PRESS_MS = 400    # hold this long: open the picker, or select in it
+SLEEP_HOLD_MS = 1200   # keep holding: sleep instead of opening the picker
+DOUBLE_TAP_MS = 350    # a second tap this soon after the first means "back"
+_stashed_press = None
 
 
 def build_keys():
@@ -1356,54 +1242,50 @@ def build_keys():
     )
 
 
-build_keys()
-
-# Everything runs off one button. keypad scans in the background and queues
-# events with timestamps, which is what makes a tap during a 0.5 s display
-# refresh survive - the old polling loop simply missed presses while it was
-# blocked in wait_busy().
-KEY_NEXT = 0
-KEY_BACK = 1  # BOOT button, kept as an optional shortcut for "previous page"
-
-LONG_PRESS_MS = 700    # hold this long: open the picker, or select in it
-SLEEP_HOLD_MS = 2500   # keep holding: sleep instead of opening the picker
-DOUBLE_TAP_MS = 400    # a second tap this soon after the first means "back"
-
-_TICKS_PERIOD = 1 << 29
-_TICKS_HALF = _TICKS_PERIOD // 2
-_stashed_press = None
-
-
-def ticks_ms_diff(later, earlier):
-    # Wrap-safe difference between two supervisor.ticks_ms() values, in ms.
-    #
-    #     ticks_ms() wraps at 2**29. A plain subtraction goes hugely negative across
-    #     that boundary, which would make a long hold look instant or a double tap
-    #     look stale, roughly every six days of uptime.
-    #
-    return ((later - earlier + _TICKS_HALF) % _TICKS_PERIOD) - _TICKS_HALF
-
-
-def next_press():
-    # The next queued press event, or None. Releases are discarded.
-    global _stashed_press
-    if _stashed_press is not None:
-        event, _stashed_press = _stashed_press, None
-        return event
-    while True:
-        event = keys.events.get()
-        if event is None:
-            return None
-        if event.pressed:
-            return event
-
-
 def drain_events():
     # Forget anything queued, so a stale tap cannot act later.
     global _stashed_press
     _stashed_press = None
-    while keys.events.get() is not None:
+    if keys is None:
+        return
+    while keys.events.get():
         pass
+
+
+def next_press():
+    global _stashed_press
+    if _stashed_press is not None:
+        e = _stashed_press
+        _stashed_press = None
+        return e
+    if keys is None:
+        return None
+    return keys.events.get()
+
+
+def ticks_ms_diff(a, b):
+    # Wrap-safe difference between two supervisor.ticks_ms() values, in ms.
+    return (a - b) & 0xFFFFFFFF
+
+
+# PIN_LED is up in the pin block. The E290 build does export board.LED0, but
+# this file deliberately never touches board.*: the same code then runs on a
+# stock ESP32-S3 build, where the name does not exist and referencing it raises
+# at startup, leaving set_led() a silent no-op and taking the only cue away from
+# the hold-to-picker and hold-to-sleep gestures.
+led = None
+try:
+    if PIN_LED is not None:
+        led = digitalio.DigitalInOut(PIN_LED)
+        led.direction = digitalio.Direction.OUTPUT
+        led.value = False
+except Exception:
+    led = None
+
+
+def set_led(on):
+    if led is not None:
+        led.value = bool(on)
 
 
 def classify_hold(key_number, press_ticks):
@@ -1417,24 +1299,22 @@ def classify_hold(key_number, press_ticks):
     # 2 = sleep armed (LED off again). The returned kind is computed from the
     # measured press-to-release time, so it does not depend on poll timing.
     stage = 0
+    set_led(False)
     while True:
         event = keys.events.get()
-        if event is not None:
-            if event.key_number == key_number and not event.pressed:
-                if stage == 1:
-                    set_led(False)
-                held = ticks_ms_diff(event.timestamp, press_ticks)
-                if held >= SLEEP_HOLD_MS:
-                    return "sleep", event.timestamp
-                if held >= LONG_PRESS_MS:
-                    return "picker", event.timestamp
-                return "tap", event.timestamp
-            continue  # ignore the other key while a gesture is in progress
+        if event is not None and event.key_number == key_number and not event.pressed:
+            set_led(False)
+            held = ticks_ms_diff(event.timestamp, press_ticks)
+            if held >= SLEEP_HOLD_MS:
+                return "sleep", event.timestamp
+            if held >= LONG_PRESS_MS:
+                return "picker", event.timestamp
+            return "tap", event.timestamp
         held = ticks_ms_diff(supervisor.ticks_ms(), press_ticks)
         if stage == 0 and held >= LONG_PRESS_MS:
             stage = 1
             set_led(True)
-        elif stage == 1 and held >= SLEEP_HOLD_MS:
+        if stage == 1 and held >= SLEEP_HOLD_MS:
             stage = 2
             set_led(False)
             # Decided: holding longer cannot change the outcome, so return now
@@ -1469,7 +1349,8 @@ def was_double_tap(release_ticks):
     _stashed_press = event
     return False
 
-# --- WHICH BOOK, AND WHERE IN IT ---
+
+# --- BOOK STATE ---
 _turns_since_save = 0
 
 
@@ -1515,7 +1396,6 @@ def file_size_of(path):
 
 
 FILE_SIZE = file_size_of(current_file)
-
 if FILE_SIZE:
     initial_offset = bookmarks.open(current_file, library)
     if initial_offset >= FILE_SIZE:
@@ -1524,6 +1404,7 @@ else:
     initial_offset = 0
 
 page_offsets = [initial_offset]
+
 
 def _hyphenate_word(word, space_left):
     # (head, rest) for a word to be split across two lines, or (None, None).
@@ -1546,12 +1427,10 @@ def _hyphenate_word(word, space_left):
     core = word[lead:tail]
     if len(core) < 5:
         return None, None
-
     prefix = word[:lead]
     budget = space_left - (get_string_width(prefix) if prefix else 0)
     if budget <= 0:
         return None, None
-
     head, rest = hyphenator.hyphenate_split(core, budget, get_string_width)
     if head is None:
         return None, None
@@ -1573,6 +1452,9 @@ def read_page_stream(filename, start_offset):
     #     line, and the short remainder of each source line would be stretched to
     #     full width.
     #
+    # Running-width pagination (matches reference packing density).
+    # First line of each page still uses STATUS_RESERVE_PX so the
+    # battery/USB indicator has a reserved corner.
     lines = []
     wrapped = []
     next_offset = start_offset
@@ -1596,10 +1478,8 @@ def read_page_stream(filename, start_offset):
                     continue
 
                 words = stripped.split(" ")
-                # Narrower while the first line of the page is being built.
-                budget = (MAX_LINE_WIDTH_PX - STATUS_RESERVE_PX if not lines
-                          else MAX_LINE_WIDTH_PX)
-                current_line = ""
+
+                current_words = []
                 current_width = 0
                 word_start_in_raw = 0
                 page_full = False
@@ -1609,17 +1489,18 @@ def read_page_stream(filename, start_offset):
                     if w_pos == -1:
                         w_pos = word_start_in_raw
 
-                    word_width = get_string_width(word)
-                    if current_line:
-                        test_line = current_line + " " + word
-                        test_width = current_width + SPACE_WIDTH + word_width
-                    else:
-                        test_line = word
-                        test_width = word_width
+                    budget = (MAX_LINE_WIDTH_PX - STATUS_RESERVE_PX if not lines
+                              else MAX_LINE_WIDTH_PX)
 
-                    if test_width <= budget:
-                        current_line = test_line
-                        current_width = test_width
+                    word_width = get_string_width(word)
+                    if current_words:
+                        prospective = current_width + SPACE_WIDTH + word_width
+                    else:
+                        prospective = word_width
+
+                    if prospective <= budget:
+                        current_words.append(word)
+                        current_width = prospective
                     else:
                         # The word does not fit. Before pushing it whole to the
                         # next line, see whether a hyphenated head of it fits
@@ -1641,28 +1522,32 @@ def read_page_stream(filename, start_offset):
                         head = None
                         rest = None
                         if hyphenate_ok and len(lines) + 1 < MAX_LINES_PER_PAGE:
-                            if current_line:
-                                space_left = (budget - current_width
-                                              - SPACE_WIDTH)
+                            if current_words:
+                                space_left = budget - current_width - SPACE_WIDTH
                             else:
                                 space_left = budget
                             if space_left > 0:
                                 head, rest = _hyphenate_word(word, space_left)
 
                         if head is not None:
-                            lines.append(current_line + " " + head
-                                         if current_line else head)
+                            if current_words:
+                                current_words.append(head)
+                            else:
+                                current_words = [head]
+                            lines.append(" ".join(current_words))
                             wrapped.append(True)
-                            current_line = rest
+                            current_words = [rest]
                             current_width = get_string_width(rest)
                         else:
-                            lines.append(current_line)
-                            wrapped.append(True)
-                            current_line = word
+                            if current_words:
+                                lines.append(" ".join(current_words))
+                                wrapped.append(True)
+                            current_words = [word]
                             current_width = word_width
 
                             if len(lines) == MAX_LINES_PER_PAGE:
-                                next_offset = line_start_pos + len(raw_line[:w_pos].encode("utf-8"))
+                                next_offset = (line_start_pos
+                                               + len(raw_line[:w_pos].encode("utf-8")))
                                 page_full = True
                                 break
 
@@ -1671,10 +1556,10 @@ def read_page_stream(filename, start_offset):
                 if page_full:
                     break
 
-                if current_line:
-                    lines.append(current_line)
-                    wrapped.append(False)     # the paragraph ended here
-                    current_line = ""
+                if current_words:
+                    lines.append(" ".join(current_words))
+                    wrapped.append(False)
+                    current_words = []
                     current_width = 0
 
                 next_offset = f.tell()
@@ -1685,6 +1570,7 @@ def read_page_stream(filename, start_offset):
     if not lines:
         return ["[End of File]"], [False], next_offset
     return lines, wrapped, next_offset
+
 
 def get_page_lines(page_idx):
     if page_idx < 0:
@@ -1703,6 +1589,7 @@ def get_page_lines(page_idx):
         page_offsets.append(nxt_off)
 
     return lines, wrapped, nxt_off
+
 
 # --- RENDERER ---
 # One landscape scratch, drawn into and then transposed into each page buffer.
@@ -1763,6 +1650,21 @@ def new_canvas(out_buf):
     return canvas
 
 
+def _can_justify(text, target_px):
+    # Enforce MAX_SPACE_STRETCH: only justify when the extra slack can be
+    # absorbed without any gap growing past MAX_SPACE_STRETCH times a
+    # normal space. Otherwise leave the line ragged-right.
+    n_gaps = text.count(" ")
+    if n_gaps == 0:
+        return False
+    natural = get_string_width(text)
+    slack = target_px - natural
+    if slack <= 0:
+        return False
+    max_extra = n_gaps * SPACE_WIDTH * (MAX_SPACE_STRETCH - 1.0)
+    return slack <= max_extra
+
+
 def render_page_buffer(page_idx):
     lines, wrapped, current_offset = get_page_lines(page_idx)
     if lines is None:
@@ -1772,10 +1674,11 @@ def render_page_buffer(page_idx):
 
     y = PAGE_TOP
     for i in range(len(lines)):
-        if JUSTIFY_TEXT and wrapped[i]:
+        target = MAX_LINE_WIDTH_PX - (STATUS_RESERVE_PX if i == 0 else 0)
+        if (JUSTIFY_TEXT and wrapped[i]
+                and _can_justify(lines[i], target)):
             draw_text_justified(canvas, lines[i], PADDING_X, y,
-                                MAX_LINE_WIDTH_PX - (STATUS_RESERVE_PX if i == 0
-                                                     else 0), color=0)
+                                target, color=0)
         else:
             draw_text(canvas, lines[i], PADDING_X, y, color=0)
         y += LINE_HEIGHT
@@ -1797,51 +1700,39 @@ def render_page_buffer(page_idx):
     if status_text:
         status_w = len(status_text) * 6
         status_x = WIDTH - status_w - PADDING_X
-        status_y = 2
-        status_h = 10
-
         # No collision test needed: the space is reserved during wrapping.
-        canvas.text(status_text, status_x, status_y, 0)
+        canvas.text(status_text, status_x, 2, 0)
 
     return end_frame()
 
 
 def render_sleep_screen():
     canvas = begin_frame()
-
     title = "Sleeping..."
     title_w = get_string_width(title)
-    title_x = (WIDTH - title_w) // 2
-    draw_text(canvas, title, title_x, 20, color=0)
-
+    draw_text(canvas, title, (WIDTH - title_w) // 2, 20, color=0)
     # Which book you were in, so a sleeping reader still identifies itself -
     # e-paper holds this screen for weeks at no power. Trimmed with an ellipsis
     # rather than overflowing the panel on a long filename.
     name = fit_text(book_title(current_file), WIDTH - 8)
     draw_text(canvas, name, (WIDTH - get_string_width(name)) // 2, 45, color=0)
-
     progress_pct = 0
     if FILE_SIZE > 0 and current_page_idx < len(page_offsets):
         offset = page_offsets[current_page_idx]
         progress_pct = int(min(100, max(0, (offset / FILE_SIZE) * 100)))
-
-    prog_text = f"{progress_pct}%"
-    draw_text(canvas, prog_text, 1, 100, color=0)
-
+    draw_text(canvas, f"{progress_pct}%", 1, 100, color=0)
     if FILE_SIZE > 0:
         fill_w = int(WIDTH * (progress_pct / 100.0))
         if fill_w > 0:
             canvas.hline(0, HEIGHT - 1, fill_w, 0)
-
     return end_frame()
+
 
 current_page_idx = 0
 refresh_counter = 0
-
 curr_buf = None
 next_buf = None
 prev_buf = None
-
 _cache_released = False
 
 
@@ -1895,14 +1786,16 @@ def prefetch_neighbours(idx):
     prev_buf = render_page_buffer(idx - 1) if idx > 0 else None
     set_led(False)
 
+
 def shift_cache_forward(new_idx):
     global curr_buf, next_buf, prev_buf
     set_led(True)
-    _give_buf(prev_buf)          # the page we are leaving behind for good
+    _give_buf(prev_buf)
     prev_buf = curr_buf
     curr_buf = next_buf
     next_buf = render_page_buffer(new_idx + 1)
     set_led(False)
+
 
 def shift_cache_backward(new_idx):
     global curr_buf, next_buf, prev_buf
@@ -1913,11 +1806,11 @@ def shift_cache_backward(new_idx):
     prev_buf = render_page_buffer(new_idx - 1) if new_idx > 0 else None
     set_led(False)
 
+
 def display_page(buf, is_full=False):
     global refresh_counter
     if buf is None:
         return
-
     set_led(True)
     if is_full or (ENABLE_PERIODIC_FULL_REFRESH and refresh_counter >= 10):
         epd.display_full(buf)
@@ -1932,19 +1825,17 @@ def show_restored_page(buf):
     if not woke_from_deep_sleep:
         display_page(buf, is_full=True)
         return
-
     if not SHOW_SLEEP_SCREEN:
         epd.set_previous(buf)
         log_step("Woke from sleep; page still on panel, no refresh needed.")
         return
-
     if FAST_WAKE:
         release_neighbours()
         epd.set_previous(render_sleep_screen())
         display_page(buf, is_full=False)
         return
-
     display_page(buf, is_full=True)
+
 
 # --- BOOK PICKER ---
 # PICKER_ROWS is set by load_reader_font(): it follows the font, and a fixed
@@ -1954,7 +1845,6 @@ def show_restored_page(buf):
 def render_list(title, labels, sel, top, out=None):
     # A scrolling list with the selected row inverted. Books and fonts both.
     canvas = begin_frame()
-
     # Every y here is the top of a glyph box, which is what PropFont.draw
     # takes. The old numbers (-3 for text, +2 for the highlight) were offsets
     # against the previous font system's origin and left the selection box
@@ -1962,7 +1852,6 @@ def render_list(title, labels, sel, top, out=None):
     draw_text(canvas, "%s  %d/%d" % (title, sel + 1, len(labels)),
               PADDING_X, 0, color=0)
     canvas.hline(0, LINE_HEIGHT - 1, WIDTH, 0)
-
     for row in range(PICKER_ROWS):
         idx = top + row
         if idx >= len(labels):
@@ -1976,7 +1865,6 @@ def render_list(title, labels, sel, top, out=None):
             draw_text(canvas, label, PADDING_X, row_y, color=1)
         else:
             draw_text(canvas, label, PADDING_X, row_y, color=0)
-
     return end_frame(out)
 
 
@@ -2019,7 +1907,6 @@ def turn_back(pages=1):
     target = max(0, current_page_idx - pages)
     if target == current_page_idx:
         return False
-
     t0 = time.monotonic()
     if target == current_page_idx - 1 and prev_buf is not None:
         current_page_idx = target
@@ -2125,10 +2012,9 @@ def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
                 break
 
             idle_since = time.monotonic()
-
-
     finally:
         _give_buf(_ui)
+
 
 def run_fonts():
     # Pick a reading font. Applies it and returns True if it changed.
@@ -2138,9 +2024,7 @@ def run_fonts():
         if len(FONTS) < 2:
             display_page(render_message_into(_ui, "Fonts", [
                 "Only one font is installed.", "",
-                "Copy more .pcf files into /fonts.",
-                "tools/ttf2bdf.py and tools/bdf2pcf.py",
-                "make them from any TTF."]))
+                "Copy more .pf files into /fonts."]))
             time.sleep(4)
             return False
 
@@ -2154,15 +2038,14 @@ def run_fonts():
 
         previous = FONTS[_font_index][0]
         if not load_reader_font(FONTS[idx][0]):
-            load_reader_font(previous)      # put back what was working
+            load_reader_font(previous)
             return False
         _font_index = idx
         save_font_choice(idx)
         return True
-
-
     finally:
         _give_buf(_ui)
+
 
 def run_picker():
     # Show the library. Returns the chosen path, or None if nothing was picked.
@@ -2178,10 +2061,6 @@ def run_picker():
         log_step("No books found.")
         return None
 
-    # Jump-to rides in as the first row, but only with a book actually open -
-    # there is nothing to seek within otherwise. It also starts selected, since
-    # seeking within the book you are reading is the commoner reason to open
-    # this menu; the book list is one tap down.
     # Jump-to and Fonts ride in as the first rows. Jump-to only with a book
     # actually open - there is nothing to seek within otherwise - and it starts
     # selected, since seeking within the book you are reading is the commoner
@@ -2234,9 +2113,9 @@ def _pages_around(target, back_bytes=4000):
     off = start
     while True:
         _, _, nxt = read_page_stream(current_file, off)
-        if nxt <= off:          # end of file
+        if nxt <= off:
             break
-        if nxt > target:        # off is the page containing target
+        if nxt > target:
             break
         prev = off
         off = nxt
@@ -2267,13 +2146,12 @@ def run_goto():
         return None
     return gotoui.run(globals())
 
+
 def jump_to_percent(pct):
     # Open the current book at pct%, with both neighbours cached.
     global page_offsets, current_page_idx, curr_buf, next_buf, prev_buf
-
     target = int(FILE_SIZE * pct / 100.0)
     prev_off, land_off = _pages_around(target)
-
     # Seed the offsets list with the previous page as well as the landing page,
     # so "back" works immediately after a jump. Pagination only runs forwards,
     # so without this there would be nothing behind the landing page.
@@ -2283,9 +2161,7 @@ def jump_to_percent(pct):
     else:
         page_offsets = [land_off]
         current_page_idx = 0
-
     reset_page_cache()
-
     set_led(True)
     curr_buf = render_page_buffer(current_page_idx)
     set_led(False)
@@ -2304,13 +2180,11 @@ def render_message_into(out, title, lines):
 def render_message(title, lines, out=None):
     # A centred title with a few lines under it. Used by the converter.
     canvas = begin_frame()
-    draw_text(canvas, title, (WIDTH - get_string_width(title)) // 2, PAGE_TOP,
-              color=0)
+    draw_text(canvas, title, (WIDTH - get_string_width(title)) // 2, PAGE_TOP, color=0)
     canvas.hline(0, PAGE_TOP + LINE_HEIGHT + 4, WIDTH, 0)
     y = PAGE_TOP + LINE_HEIGHT * 2
     for line in lines:
-        draw_text(canvas, fit_text(line, MAX_LINE_WIDTH_PX), PADDING_X, y,
-                  color=0)
+        draw_text(canvas, fit_text(line, MAX_LINE_WIDTH_PX), PADDING_X, y, color=0)
         y += LINE_HEIGHT
     return end_frame(out)
 
@@ -2353,20 +2227,16 @@ def switch_to_book(path):
     # Store where we are, then open path at its own remembered position.
     global current_file, FILE_SIZE, page_offsets, current_page_idx
     global curr_buf, next_buf, prev_buf
-
     save_position(force=True)
-
     current_file = path
     FILE_SIZE = file_size_of(path)
     present = list_books()
     offset = bookmarks.open(path, present)
     if FILE_SIZE and offset >= FILE_SIZE:
         offset = 0
-
     page_offsets = [offset]
     current_page_idx = 0
     reset_page_cache()
-
     set_led(True)
     curr_buf = render_page_buffer(0)
     set_led(False)
@@ -2590,6 +2460,7 @@ def enter_deep_sleep():
 
     alarm.exit_and_deep_sleep_until_alarms(wake_btn_next, wake_btn_prev)
 
+
 def open_picker():
     # Run the picker and act on the choice. Shared by the awake path and the
     #     light-sleep wake path, so a long press behaves identically either way.
@@ -2630,8 +2501,7 @@ def open_picker():
     drain_events()
 
 
-# Boot setup
-# --- A CONVERSION BOOT ENDS HERE ---
+# --- CONVERSION BOOT ---
 # Placed after the renderer, not before it: convboot draws progress screens
 # through display_page and render_message_into, and running it earlier failed
 # with KeyError('display_page') a second into every conversion - which looked
@@ -2643,6 +2513,8 @@ if PENDING_CONVERT:
 
 woke_from_deep_sleep = alarm.wake_alarm is not None
 
+
+build_keys()
 
 log_step(f"Rendering restored page (offset {initial_offset} from NVM)...")
 t0 = time.monotonic()
@@ -2665,12 +2537,9 @@ log_step("boot: reset=%s usb_connected=%s" % (microcontroller.cpu.reset_reason, 
 last_activity_time = time.monotonic()
 
 # --- MAIN LOOP ---
-
 try:
     while True:
-
         now = time.monotonic()
-
         event = next_press()
         if event is not None:
             if event.key_number == KEY_BACK:
@@ -2753,4 +2622,3 @@ finally:
     epd.release_bus()
     set_led(False)
     print("Reader exited; display powered down and SPI bus released.")
-
