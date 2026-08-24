@@ -364,10 +364,23 @@ PANELS = {
         "page_margin": 0,
         "buf_bytes": 16 * 296,
         "scratch_bytes": 37 * 128,
-        # UNCALIBRATED. Placeholder scaled from the Badger's 3x divider against
-        # the E213's numbers; it will read approximately, not accurately. Run
-        # tools/battery_calibrate.py on this board and replace these.
-        "cal_points": ((13370.3, 3.40), (14480.6, 3.70), (16336.1, 4.20)),
+        # These were the E213's points, copy-pasted rather than scaled: the
+        # comment here used to claim a 3x scaling that the numbers never
+        # actually got, so raw Badger counts (~26800-26900 on a real unit)
+        # extrapolated past the E213 table's top point to a ~7V "reading",
+        # which BATTERY_MAX_V rejects as implausible every time - so the
+        # corner stayed blank on battery (USB still showed "USB", since that
+        # path doesn't touch the ADC).
+        #
+        # Unlike the E213/E290's converters, the Badger's VBAT_SENSE is the
+        # RP2040's own fixed 3:1 resistor divider, which is genuinely linear,
+        # so it doesn't need a measured curve: raw = volts * 65535 / (3*3.3).
+        # Verified against a live reading on real hardware, on battery power
+        # (USB attached pins VSYS near 4V and cannot be used to check this):
+        # raw counts matched this formula's prediction to within 0.1%.
+        "cal_points": ((3.40 * 65535 / 9.9, 3.40),
+                       (3.70 * 65535 / 9.9, 3.70),
+                       (4.20 * 65535 / 9.9, 4.20)),
     },
     "e290": {
         "driver": "ssd1680e290",
