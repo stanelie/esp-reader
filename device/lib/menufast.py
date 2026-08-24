@@ -31,6 +31,11 @@ def flip(R, buf, old_row, new_row, title, sel, total):
     if canvas is None or R["reader_font"] is None:
         return False
     epd = R["epd"]
+    # Both halves of this - the banded rotate and the XOR - are written for the
+    # rotation-3 mapping only. On any other panel the caller redraws the list,
+    # which is correct, just slower.
+    if epd.rotation != 3:
+        return False
     line_h = R["LINE_HEIGHT"]
     canvas.fill_rect(0, 0, R["WIDTH"], line_h - 1, 1)
     R["draw_text"](canvas, "%s  %d/%d" % (title, sel + 1, total),

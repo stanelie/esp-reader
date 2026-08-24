@@ -222,10 +222,17 @@ class LCMEN2R13EFC1:
         self.send_data(0xB7)
 
         self.send_command(_DATA_START_TRANSMISSION_1)
-        self.send_data(new_buffer)
+        # Exactly one frame, never more. The reader claims its page buffers
+        # before it knows which board this is, so it sizes them for the largest
+        # panel it supports - a buffer handed here can be bigger than this
+        # panel's frame. Sending the surplus pushes it into the panel's RAM
+        # past the end of the image, where it wraps onto the opposite edge:
+        # 736 spare bytes is 46 rows of 250, which showed up as a blank stripe
+        # down one sixth of the E213.
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
 
         self.send_command(_DATA_START_TRANSMISSION_2)
-        self.send_data(new_buffer)
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
 
         # Harmless when the rails are already up: BUSY never drops, so this
         # costs ~2 ms instead of the ~136 ms a cold power-on takes.
@@ -266,10 +273,10 @@ class LCMEN2R13EFC1:
         self.send_data(LUT_BB_PARTIAL)
 
         self.send_command(_DATA_START_TRANSMISSION_1)
-        self.send_data(self.previous_buffer)
+        self.send_data(memoryview(self.previous_buffer)[:self.buffer_size])
 
         self.send_command(_DATA_START_TRANSMISSION_2)
-        self.send_data(new_buffer)
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
 
         # Harmless when the rails are already up: BUSY never drops, so this
         # costs ~2 ms instead of the ~136 ms a cold power-on takes.

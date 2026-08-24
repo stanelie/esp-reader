@@ -59,6 +59,11 @@ def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
             for c in range(c0, c1):
                 dst[base + c] = blank
     else:
+        # A band is only mapped for rotation 3. Clearing the whole destination
+        # and then filling one band would wipe the screen and put a single
+        # stripe back, so refuse instead - callers fall back to a full frame.
+        if band:
+            raise ValueError("banded rotate needs rotation 3")
         for i in range(len(dst)):
             dst[i] = blank
 

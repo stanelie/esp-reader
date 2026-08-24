@@ -363,7 +363,14 @@ class SSD1680E290:
         self._set_window()
         self._set_cursor()
         self.send_command(_WRITE_RAM_BW)
-        self.send_data(new_buffer)
+        # Exactly one frame, never more. The reader claims its page buffers
+        # before it knows which board this is, so it sizes them for the largest
+        # panel it supports - a buffer handed here can be bigger than this
+        # panel's frame. Sending the surplus pushes it into the panel's RAM
+        # past the end of the image, where it wraps onto the opposite edge:
+        # 736 spare bytes is 46 rows of 250, which showed up as a blank stripe
+        # down one sixth of the E213.
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
 
         # 0xF7 carries the load-LUT-from-OTP bit, so this overwrites whatever
         # was uploaded to the LUT register: the next partial has to send it
@@ -398,11 +405,11 @@ class SSD1680E290:
         self._set_window()
         self._set_cursor()
         self.send_command(_WRITE_RAM_OLD)
-        self.send_data(self.previous_buffer)
+        self.send_data(memoryview(self.previous_buffer)[:self.buffer_size])
 
         self._set_cursor()
         self.send_command(_WRITE_RAM_BW)
-        self.send_data(new_buffer)
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
 
         self._update(_MODE_PARTIAL)
 

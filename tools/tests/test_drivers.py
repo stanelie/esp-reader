@@ -60,6 +60,42 @@ def fake_digitalio():
     return m
 
 
+CASES = (("ssd1680e290", "SSD1680E290", 3, False),
+         ("lcmen2r13efc1", "LCMEN2R13EFC1", 1, True),
+         ("uc8151badger", "UC8151Badger", 3, True))
+
+
+def check_oversize():
+    # A driver must send exactly one frame even when handed a bigger buffer.
+    #
+    # The reader claims its page buffers before it knows which board it is on,
+    # so they are sized for the largest supported panel. Passing the surplus to
+    # a smaller panel pushes it past the end of the image and it wraps onto the
+    # opposite edge - 736 spare bytes is 46 rows of 250, a blank stripe down a
+    # sixth of the E213.
+    bad = 0
+    for mod, cls, rot, ready in CASES:
+        sys.modules["digitalio"] = fake_digitalio()
+        sys.path.insert(0, LIB)
+        if mod in sys.modules:
+            del sys.modules[mod]
+        m = __import__(mod)
+        spi = SPI()
+        epd = getattr(m, cls)(spi, Pin(), Pin(), Pin(), Pin(ready), rotation=rot)
+        oversize = bytearray(epd.buffer_size + 736)
+        spi.written = 0
+        epd.display_full(oversize)
+        # commands are single bytes; the frame is what dominates
+        if spi.written > epd.buffer_size * 2 + 64:
+            print("  %-14s sent %d bytes for a %d-byte frame" %
+                  (cls, spi.written, epd.buffer_size))
+            bad += 1
+        else:
+            print("  %-14s oversize buffer -> %d bytes sent (frame %d)" %
+                  (cls, spi.written, epd.buffer_size))
+    return bad
+
+
 def check_region():
     # The windowed refresh gathers the right pixels.
     #
@@ -109,7 +145,8 @@ def main():
     # SSD1680 is busy-high; the UC8151-class panel is busy-low.
     # (module, class, rotation, what BUSY reads when the panel is ready).
     # The SSD1680 signals busy HIGH; the two UC8151-family panels signal it LOW.
-    cases = (("ssd1680e290", "SSD1680E290", 3, False),
+    cases = CASES
+    _unused = (("ssd1680e290", "SSD1680E290", 3, False),
              ("lcmen2r13efc1", "LCMEN2R13EFC1", 1, True),
              ("uc8151badger", "UC8151Badger", 3, True))
     fails = 0
@@ -153,6 +190,7 @@ def main():
             print("       WARNING: less than one frame was sent")
             fails += 1
 
+    fails += check_oversize()
     fails += check_region()
 
     print("\n%s" % ("%d drivers exercise clean" % len(cases) if not fails
