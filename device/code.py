@@ -707,7 +707,8 @@ PICKER_TIMEOUT = 60           # leave the picker untouched this long and it back
 # on screen rather than producing a 0-byte book.
 ENABLE_EPUB = True
 
-GOTO_ROW = "\x00__goto__"      # sentinel picker rows, never filenames
+BACK_ROW = "\x00__back__"      # sentinel picker rows, never filenames
+GOTO_ROW = "\x00__goto__"
 FONTS_ROW = "\x00__fonts__"
 GOTO_STEP = 5                 # percent per tap in the jump-to screen
 
@@ -1887,6 +1888,8 @@ def render_list(title, labels, sel, top, out=None):
 
 
 def picker_label(name):
+    if name == BACK_ROW:
+        return "Back"
     if name == GOTO_ROW:
         return "Jump to…"
     if name == FONTS_ROW:
@@ -2079,13 +2082,16 @@ def run_picker():
         log_step("No books found.")
         return None
 
-    # Jump-to and Fonts ride in as the first rows. Jump-to only with a book
-    # actually open - there is nothing to seek within otherwise - and it starts
-    # selected, since seeking within the book you are reading is the commoner
-    # reason to open this menu; the book list is a tap or two down.
+    # Back, Jump-to and Fonts ride in as the first rows, all only with a book
+    # actually open - there is nowhere to go back to and nothing to seek
+    # within otherwise. Jump-to starts selected, not Back, since seeking
+    # within the book you are reading is the commoner reason to open this
+    # menu; the book list is a tap or two down. Back sits one row above it -
+    # a single BACK-button press away, matching what BACK does everywhere
+    # else in the reader - for when the menu was opened by mistake.
     if FILE_SIZE > 0:
-        names = [GOTO_ROW, FONTS_ROW] + names
-        sel = 0
+        names = [BACK_ROW, GOTO_ROW, FONTS_ROW] + names
+        sel = 1
     else:
         names = [FONTS_ROW] + names
         sel = names.index(current_file) if current_file in names else 0
@@ -2486,7 +2492,9 @@ def open_picker():
     # Run the picker and act on the choice. Shared by the awake path and the
     #     light-sleep wake path, so a long press behaves identically either way.
     chosen = run_picker()
-    if chosen == FONTS_ROW:
+    if chosen == BACK_ROW:
+        display_page(curr_buf)
+    elif chosen == FONTS_ROW:
         if run_fonts():
             log_step("Font is now %s; reflowing from offset %d"
                      % (font_path, page_offsets[current_page_idx]))
