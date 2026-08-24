@@ -35,9 +35,11 @@ def flip(R, buf, old_row, new_row, title, sel, total):
     canvas.fill_rect(0, 0, R["WIDTH"], line_h - 1, 1)
     R["draw_text"](canvas, "%s  %d/%d" % (title, sel + 1, total),
                    R["PADDING_X"], 0, color=0)
+    # Same polarity as the rest of the frame, or the header band comes out
+    # reversed against it.
     rotate(R["_frame_scratch"], buf, epd.landscape_width, epd.landscape_height,
            epd.landscape_stride, epd.width, epd.height, epd.bytes_per_row,
-           epd.rotation, 0, line_h)
+           epd.rotation, 0, line_h, R.get("INVERT_OUTPUT", False))
     for row in (old_row, new_row):
         xor_band(epd, buf, line_h * (row + 1), line_h)
     return True

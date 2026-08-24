@@ -326,6 +326,12 @@ PANELS = {
         "rst": "GPIO21",
         "busy": "GPIO26",
         "rotation": 3,
+        # This panel wants blank = 0x00 and ink = 0xFF, the opposite of every
+        # FrameBuffer here. Flipped during the rotation rather than with the
+        # controller's DDX bit: the reference driver's partial waveforms were
+        # tuned against the vendor's DDX, and matching its black means feeding
+        # the panel the polarity it expects rather than asking it to remap.
+        "invert_output": True,
         # SW_UP / SW_DOWN rather than the A/B/C row: they sit on the right
         # edge where a thumb rests, and the other three are unused - this
         # reader has never had more than two buttons to be worth binding.
@@ -507,6 +513,7 @@ PIN_LED = _pin(PANEL.get("led"))
 PIN_ADC_CTRL = _pin(PANEL.get("adc_ctrl"))
 PIN_BATTERY = _pin(PANEL.get("battery"))
 KEYS_ACTIVE_LOW = PANEL.get("keys_active_low", True)
+INVERT_OUTPUT = PANEL.get("invert_output", False)
 # Everything that reads a button or arms a wake alarm goes through these two,
 # so a board that wires its buttons the other way needs no other change.
 KEY_PULL = digitalio.Pull.UP if KEYS_ACTIVE_LOW else digitalio.Pull.DOWN
@@ -1165,15 +1172,21 @@ def load_reader_font(path):
     # A .pf glyph box already contains the room a line needs above and below
     # the ink, so the line pitch is the box plus whatever the panel wants
     # between lines.
-    LINE_HEIGHT = font.box_h + PANEL["leading"]
-    PAGE_TOP = PANEL["page_margin"]
+    # Pitch from the font's ink, not its glyph box. A box carries slack above
+    # the capitals and below the descenders, and how much varies with the tool
+    # that built it - charging the page for that costs a whole line to a font
+    # that merely renders a pixel taller. build_pf.py measures it and stores it
+    # in the header; a PFN1 font reports its box, as before.
+    LINE_HEIGHT = font.ink_h + PANEL["leading"]
+    PAGE_TOP = PANEL["page_margin"] - font.ink_top
     # How many lines actually fit, rather than a guess with a 2px fudge.
     # A line occupies PAGE_TOP + i*LINE_HEIGHT .. + box_h, so the last one
     # fits when PAGE_TOP + (n-1)*LINE_HEIGHT + box_h <= HEIGHT. The old form
     # lost a whole line whenever the panel divided evenly by the pitch - the
     # 8x16 VGA face on a 128px panel is exactly that case, and showed as a
     # blank strip along the bottom.
-    MAX_LINES_PER_PAGE = (HEIGHT - PAGE_TOP - font.box_h) // LINE_HEIGHT + 1
+    MAX_LINES_PER_PAGE = ((HEIGHT - PANEL["page_margin"] - font.ink_h)
+                          // LINE_HEIGHT + 1)
     PICKER_ROWS = MAX_LINES_PER_PAGE - 1      # one row goes to the header
     SPACE_WIDTH = font.text_width(" ")
 
@@ -1717,7 +1730,8 @@ def end_frame(out=None):
         out = _take_buf()
     rotate(_frame_scratch, out,
            epd.landscape_width, epd.landscape_height, epd.landscape_stride,
-           epd.width, epd.height, epd.bytes_per_row, epd.rotation)
+           epd.width, epd.height, epd.bytes_per_row, epd.rotation,
+           invert=INVERT_OUTPUT)
     return out
 
 

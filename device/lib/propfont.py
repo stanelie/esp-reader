@@ -28,8 +28,10 @@ class PropFont:
         try:
             if file_backed:
                 head = f.read(9)
-                if len(head) < 9 or bytes(head[:4]) != b"PFN1":
+                if len(head) < 9 or bytes(head[:4]) not in (b"PFN1", b"PFN2"):
                     raise ValueError("bad font file")
+                if bytes(head[:4]) == b"PFN2":
+                    head = head + f.read(2)      # ink_top, ink_h
                 d = head + f.read(head[7] * 4)   # header + glyph records
                 self._f = f
                 f = None                          # kept open for glyph reads
@@ -45,7 +47,12 @@ class PropFont:
                 f.close()
         # bytes() around the slice: `buf` may be a bytearray, and comparing a
         # bytearray slice to a bytes literal is not reliable across ports.
-        if bytes(d[:4]) != b"PFN1":
+        # PFN2 adds ink_top and ink_h after the space advance. PFN1 files -
+        # anything built before the page pitch keyed off ink rather than the
+        # glyph box - still load; they just report the box, which is what the
+        # reader used to use anyway.
+        magic = bytes(d[:4])
+        if magic not in (b"PFN1", b"PFN2"):
             raise ValueError("bad font file")
         self.d = d
         self.box_h = d[4]
@@ -56,7 +63,14 @@ class PropFont:
         # and justified lines run together. Enforce a visible minimum scaled to
         # the font height so it holds across sizes.
         self.space_w = max(d[8], round(self.box_h * min_space_ratio))
-        self.rec0 = 9
+        if magic == b"PFN2":
+            self.ink_top = d[9]
+            self.ink_h = d[10]
+            self.rec0 = 11
+        else:
+            self.ink_top = 0
+            self.ink_h = self.box_h
+            self.rec0 = 9
         self.bmp0 = self.rec0 + self.count * 4
         self._qmark = ord("?")
         self._space_idx = ord(" ") - self.first

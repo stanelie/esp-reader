@@ -24,7 +24,7 @@
 
 
 def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
-           rotation, y0=0, y1=None):
+           rotation, y0=0, y1=None, invert=False):
     # Transpose `src` (landscape) into `dst` (native). Both are bytearrays.
     #
     #     land_stride / nat_stride are bytes per row.
@@ -33,13 +33,22 @@ def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
     # alone. A menu highlight moving one row does not need the other eight
     # transposed - measured at ~250ms for a whole frame on the RP2040, which is
     # most of what makes a keypress feel slow.
+    # `invert` writes the panel's own polarity instead of the framebuffer's.
+    # The Badger's UC8151 wants blank = 0x00 and ink = 0xFF, the opposite of
+    # every FrameBuffer in this reader. Done here rather than as a pass over
+    # the finished frame for two reasons: this loop already touches only the
+    # ink, so it is almost free, where a separate pass is 4736 Python
+    # iterations on every render; and doing it here covers the BANDED rotate
+    # too, which a pass over `out` in end_frame() does not - the menu's header
+    # band would come out in the opposite polarity to the rest of the screen.
+    blank = 0x00 if invert else 0xFF
     if y1 is None:
         y1 = land_h
     band = (y0 != 0) or (y1 != land_h)
 
     if not band:
         for i in range(len(dst)):
-            dst[i] = 0xFF                 # white; ink is cleared in below
+            dst[i] = blank
     elif rotation == 3:
         # One landscape row is one bit position inside a fixed byte column, so
         # a band of rows is a few whole columns across every native row.
@@ -48,16 +57,17 @@ def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
         for r in range(nat_h):
             base = r * nat_stride
             for c in range(c0, c1):
-                dst[base + c] = 0xFF
+                dst[base + c] = blank
     else:
         for i in range(len(dst)):
-            dst[i] = 0xFF
+            dst[i] = blank
 
     if rotation == 3:
         # A whole landscape row lands in one native column, so the destination
         # bit position is fixed for the row and only the byte index moves.
         for y in range(y0, y1):
-            mask = ~(0x80 >> (y & 7)) & 0xFF
+            bit = 0x80 >> (y & 7)
+            mask = ~bit & 0xFF
             col = y >> 3
             row_base = y * land_stride
             for bx in range(land_stride):
@@ -69,7 +79,11 @@ def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
                     if not (byte >> (7 - b)) & 1:
                         x = x0 + b
                         if x < land_w:
-                            dst[(nat_h - 1 - x) * nat_stride + col] &= mask
+                            i = (nat_h - 1 - x) * nat_stride + col
+                            if invert:
+                                dst[i] |= bit
+                            else:
+                                dst[i] &= mask
     elif rotation == 1:
         for y in range(land_h):
             nx = nat_w - 1 - y

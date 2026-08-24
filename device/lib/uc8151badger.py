@@ -76,18 +76,11 @@ _HZ_100 = 0b00111010
 # of the computed tables and is what gives a full page its deepest black. A
 # computed speed-2 refresh looks correct on its own but is visibly greyer side
 # by side with an OTP one, which is what a full refresh is for.
-# TESTED AND WRONG - left here as a record so it is not tried again.
-#
-# The theory was that with DDX inverted the panel might select its transition
-# waveform from the raw RAM bits rather than the mapped colour, so a pixel
-# heading for black would get the black-to-white table and land grey. Swapping
-# the two tables to compensate garbles the screen outright, which says the
-# panel does apply DDX before choosing a LUT. The polarity handling is correct
-# and the contrast difference is somewhere else.
-_SWAP_TRANSITION_LUTS = False
-
 _SPEED_FULL = None
-_SPEED_PARTIAL = 4       # quick, and with WW/BB emptied, only changed pixels
+# 3, not 4: measured on the panel as the densest partial black that is
+# still quiet. The waveform is longer, so a page turn costs a little more
+# time for a visibly darker result.
+_SPEED_PARTIAL = 3
 
 
 def _lut_row(lut, row, pat, dur, rep):
@@ -379,14 +372,14 @@ class UC8151Badger:
         self.send_data(0x22)
         # Register 0x50: [7:6] border, [5:4] data polarity (DDX), [3:0] interval.
         #
-        # DDX is 11, not the vendor driver's 00. That driver keeps its own
-        # framebuffer where 0 is white; this reader's convention is the
-        # opposite - a blank page is 0xFF - and feeding those bits to a panel
-        # expecting the other polarity gives a correct but photographically
-        # negative page. The E213 driver, same controller family and the same
-        # 0xFF-is-blank convention, also runs DDX 11.
+        # DDX 00, the vendor's value. This reader draws with 0xFF as blank and
+        # the panel wants the opposite, but the polarity is flipped in the
+        # rotation instead of here - see fbrotate.rotate(invert=...). Doing it
+        # in the data rather than in DDX keeps the LUT selection on exactly the
+        # ground the reference driver's waveforms were tuned against, which is
+        # what makes the partial refreshes reach the same black.
         self.send_command(_CDI)
-        self.send_data(0b11_11_1100)
+        self.send_data(0b11_00_1100)
         self.send_command(_PLL)
         self.send_data(_HZ_100)
         self.send_command(_POF)
@@ -398,9 +391,6 @@ class UC8151Badger:
         if self._lut_speed == key:
             return
         vcom, ww, bw, wb, bb = _build_luts(speed, no_flickering)
-        if _SWAP_TRANSITION_LUTS:
-            bw, wb = wb, bw
-            ww, bb = bb, ww
         for cmd, table in ((_LUT_VCOM, vcom), (_LUT_WW, ww), (_LUT_BW, bw),
                            (_LUT_WB, wb), (_LUT_BB, bb)):
             self.send_command(cmd)

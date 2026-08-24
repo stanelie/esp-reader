@@ -162,6 +162,7 @@ box_h = union_bot - union_top
 baseline = BASE - union_top
 
 records, bitmap = bytearray(), bytearray()
+struct_off, struct_bw = {}, {}
 for ch in CHARS:
     adv = advances[ch]
     g, is_ink = render(ch, max(adv + 4, 8))
@@ -176,9 +177,39 @@ for ch in CHARS:
             if is_ink(rx, sy):
                 row[rx >> 3] |= 0x80 >> (rx & 7)
         bitmap += row
+    struct_off[ch] = off
+    struct_bw[ch] = box_w
     records += bytes([min(adv, 255), min(box_w, 255), off & 0xFF, (off >> 8) & 0xFF])
 
-header = bytes(b"PFN1") + bytes([box_h, baseline, FIRST, len(CHARS), min(advances[" "], 255)])
+# Ink extent over the characters prose is made of, stored so the reader does
+# not have to scan every glyph at load. The page pitch keys off this, not off
+# box_h: a box carries slack above the capitals and below the descenders, and
+# how much varies with how the font was built - charging the page for it costs
+# a whole line to a font that merely renders a pixel taller.
+#
+# Prose characters only. A few rare standalone marks sit higher than any
+# letter, and sizing the page to them loses a line to something no book uses -
+# the same trade this file already makes when sizing the box.
+ink_top, ink_bot = box_h, -1
+for ch in CHARS:
+    if not (ch.isalnum() or ch in ",.;:!?'\"()-/"):
+        continue
+    off = struct_off[ch]
+    bw = struct_bw[ch]
+    rb = (bw + 7) // 8
+    for ry in range(box_h):
+        row = bitmap[off + ry * rb:off + ry * rb + rb]
+        if any(row):
+            if ry < ink_top:
+                ink_top = ry
+            if ry > ink_bot:
+                ink_bot = ry
+if ink_bot < 0:
+    ink_top, ink_bot = 0, box_h - 1
+ink_h = ink_bot - ink_top + 1
+
+header = bytes(b"PFN2") + bytes([box_h, baseline, FIRST, len(CHARS),
+                                 min(advances[" "], 255), ink_top, ink_h])
 open(OUT, "wb").write(header + bytes(records) + bytes(bitmap))
 print(f"{TTF} size={SIZE} thresh={'mono' if MONO else THRESH} box_h={box_h} baseline={baseline} "
       f"space={advances[' ']} glyphs={len(CHARS)} "
