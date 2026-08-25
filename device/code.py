@@ -2122,16 +2122,27 @@ def _snap_to_line(pos):
     #     Done in binary: seeking to an arbitrary byte can land mid-UTF-8, which text
     #     mode will not decode. Page offsets are byte offsets anyway.
     #
+    #     Best-effort: on any failure to read ahead - a fragmented heap refusing
+    #     this chunk's allocation is the one actually seen in practice, deep in
+    #     the picker or goto screens where a lot of small strings and canvases
+    #     are already live - fall back to pos itself, unsnapped, rather than 0.
+    #     Unsnapped costs nothing but a mid-line first page; falling back to 0
+    #     turned _pages_around()'s bounded back_bytes search into a linear scan
+    #     of everything before the target, which is the whole file for anything
+    #     past the very start of a book - minutes, not a snap-to-line nicety.
+    #     512 bytes rather than 4096 for the same reason: smaller allocation,
+    #     less likely to be the one the fragmented heap cannot satisfy.
+    #
     if pos <= 0:
         return 0
     try:
         with open(current_file, "rb") as f:
             f.seek(pos)
-            chunk = f.read(4096)
+            chunk = f.read(512)
             i = chunk.find(b"\n")
             return pos + i + 1 if i >= 0 else pos
     except Exception:
-        return 0
+        return pos
 
 
 def _pages_around(target, back_bytes=4000):
