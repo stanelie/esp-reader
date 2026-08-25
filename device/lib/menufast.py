@@ -33,7 +33,10 @@ def flip(R, buf, old_row, new_row, title, sel, total, show_count=True):
     epd = R["epd"]
     # Both halves of this - the banded rotate and the XOR - are written for the
     # rotation-3 mapping only. On any other panel the caller redraws the list,
-    # which is correct, just slower.
+    # which is correct, just slower. Without this guard, xor_band() no-ops on
+    # a non-rotation-3 panel (it has its own internal check) while the header
+    # redraw above still runs - so the position counter updates but the
+    # selected-row highlight silently stops moving.
     if epd.rotation != 3:
         return False
     line_h = R["LINE_HEIGHT"]
