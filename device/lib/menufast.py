@@ -15,14 +15,14 @@
 from fbrotate import rotate
 
 
-def flip(R, buf, old_row, new_row, title, sel, total):
+def flip(R, buf, old_row, new_row, title, sel, total, show_count=True):
     # Flip two highlight bands and refresh the header. True if it worked.
     #
     #     The highlight is a plain inversion - a black bar with white text where
     #     the other rows are black text on white - so XORing a row's band turns
     #     one into the other exactly. Only the header needs drawing again,
-    #     because it carries the position counter, and only its band is
-    #     transposed.
+    #     because it carries the position counter (where there is one), and
+    #     only its band is transposed.
     #
     #     This leans on the landscape scratch still holding the list from the
     #     last full render. Anything calling begin_frame() in between
@@ -38,8 +38,8 @@ def flip(R, buf, old_row, new_row, title, sel, total):
         return False
     line_h = R["LINE_HEIGHT"]
     canvas.fill_rect(0, 0, R["WIDTH"], line_h - 1, 1)
-    R["draw_text"](canvas, "%s  %d/%d" % (title, sel + 1, total),
-                   R["PADDING_X"], 0, color=0)
+    header = "%s  %d/%d" % (title, sel + 1, total) if show_count else title
+    R["draw_text"](canvas, header, R["PADDING_X"], 0, color=0)
     # Same polarity as the rest of the frame, or the header band comes out
     # reversed against it.
     rotate(R["_frame_scratch"], buf, epd.landscape_width, epd.landscape_height,

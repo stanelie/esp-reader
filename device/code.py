@@ -1876,15 +1876,15 @@ def show_restored_page(buf):
 # value here would freeze whatever the boot font happened to give.
 
 
-def render_list(title, labels, sel, top, out=None):
+def render_list(title, labels, sel, top, out=None, show_count=True):
     # A scrolling list with the selected row inverted. Books and fonts both.
     canvas = begin_frame()
     # Every y here is the top of a glyph box, which is what PropFont.draw
     # takes. The old numbers (-3 for text, +2 for the highlight) were offsets
     # against the previous font system's origin and left the selection box
     # five pixels out of step with its own text.
-    draw_text(canvas, "%s  %d/%d" % (title, sel + 1, len(labels)),
-              PADDING_X, 0, color=0)
+    header = "%s  %d/%d" % (title, sel + 1, len(labels)) if show_count else title
+    draw_text(canvas, header, PADDING_X, 0, color=0)
     canvas.hline(0, LINE_HEIGHT - 1, WIDTH, 0)
     for row in range(PICKER_ROWS):
         idx = top + row
@@ -1963,17 +1963,17 @@ def turn_back(pages=1):
     return True
 
 
-def _menu_flip(buf, old_row, new_row, title, sel, total):
+def _menu_flip(buf, old_row, new_row, title, sel, total, show_count=True):
     # lib/menufast.py, imported on first use - see the note at its top for why
     # it is not compiled into this file.
     try:
         import menufast
     except Exception:
         return False
-    return menufast.flip(globals(), buf, old_row, new_row, title, sel, total)
+    return menufast.flip(globals(), buf, old_row, new_row, title, sel, total, show_count)
 
 
-def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
+def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen.", show_count=True):
     # Scroll a list and return the chosen index, or None.
     #
     #     The gesture vocabulary and its subtleties live here once: tap moves down,
@@ -2012,10 +2012,10 @@ def choose_from_list(title, labels, sel=0, idle_msg="Idle; nothing chosen."):
             # bands instead of drawing the whole screen again.
             if (_shown_sel is not None and _shown_top == top and sel != _shown_sel
                     and _menu_flip(_ui, _shown_sel - top, sel - top,
-                                   title, sel, len(labels))):
+                                   title, sel, len(labels), show_count)):
                 display_page(_ui)
             else:
-                display_page(render_list(title, labels, sel, top, _ui))
+                display_page(render_list(title, labels, sel, top, _ui, show_count))
             _shown_sel, _shown_top = sel, top
 
             if pending_release is not None:
@@ -2111,8 +2111,8 @@ def run_picker():
         sel = names.index(current_file) if current_file in names else 0
 
     labels = [picker_label(nm) for nm in names]
-    idx = choose_from_list("Books", labels, sel,
-                           "Picker idle; keeping the current book.")
+    idx = choose_from_list("menu :", labels, sel,
+                           "Picker idle; keeping the current book.", show_count=False)
     return None if idx is None else names[idx]
 
 
