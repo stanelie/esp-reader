@@ -1272,6 +1272,18 @@ def drain_events():
 
 
 def next_press():
+    # A fresh key-down, or None. Never a release: every caller treats
+    # whatever this returns as "a key was just pressed, go act on it," and a
+    # release left unconsumed by a caller (KEY_BACK's handlers act on the
+    # press and never wait for its release; was_double_tap() consumes the
+    # second tap's press but not its release) would otherwise resurface here
+    # on the next call and get misread as a brand-new press - for a stray
+    # KEY_BACK release, a second unwanted turn_back(); for a stray KEY_NEXT
+    # release, classify_hold() timing a "hold" from a timestamp already in
+    # the past, which reaches SLEEP_HOLD_MS almost at once and forces the
+    # reader into deep sleep. Filtering here fixes every call site at once,
+    # since classify_hold() reads keys.events.get() directly and never goes
+    # through this function.
     global _stashed_press
     if _stashed_press is not None:
         e = _stashed_press
@@ -1279,7 +1291,10 @@ def next_press():
         return e
     if keys is None:
         return None
-    return keys.events.get()
+    while True:
+        e = keys.events.get()
+        if e is None or e.pressed:
+            return e
 
 
 def ticks_ms_diff(a, b):
