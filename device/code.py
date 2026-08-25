@@ -2199,6 +2199,14 @@ def run_goto():
 def jump_to_percent(pct):
     # Open the current book at pct%, with both neighbours cached.
     global page_offsets, current_page_idx, curr_buf, next_buf, prev_buf
+    # Freed first, not after the search: _pages_around() can take a moment
+    # (a large back_bytes window on a slow board), and a buffer taken here
+    # for the "Jumping…" screen has to come from somewhere - the pool is
+    # empty until curr/next/prev give theirs back.
+    reset_page_cache()
+    _ui = _take_buf()
+    display_page(render_message_into(_ui, "Jumping…", ["%d%%" % pct]))
+    _give_buf(_ui)
     target = int(FILE_SIZE * pct / 100.0)
     prev_off, land_off = _pages_around(target)
     # Seed the offsets list with the previous page as well as the landing page,
@@ -2210,7 +2218,6 @@ def jump_to_percent(pct):
     else:
         page_offsets = [land_off]
         current_page_idx = 0
-    reset_page_cache()
     set_led(True)
     curr_buf = render_page_buffer(current_page_idx)
     set_led(False)
