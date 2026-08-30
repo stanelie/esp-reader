@@ -422,10 +422,18 @@ class UC8151Badger:
 
         # DTM1 is what is on the glass, DTM2 what should be. The panel drives
         # only the pixels where they differ, when WW and BB are empty.
+        #
+        # Truncated to buffer_size even though this board's own buf_bytes
+        # already equals the reader's shared _BUF_BYTES, so a real page
+        # buffer is never actually oversized here - unlike the E213, which
+        # needs this to avoid the 736-byte wraparound described in
+        # build_display()'s claim block. Kept for the same reason the E213
+        # and E290 drivers keep it: a caller is not guaranteed to hand this
+        # exact size, and the alternative is trusting that invariant forever.
         self.send_command(_DTM1)
-        self.send_data(self.previous_buffer)
+        self.send_data(memoryview(self.previous_buffer)[:self.buffer_size])
         self.send_command(_DTM2)
-        self.send_data(new_buffer)
+        self.send_data(memoryview(new_buffer)[:self.buffer_size])
         self.send_command(_DSP)
 
         self.send_command(_DRF)

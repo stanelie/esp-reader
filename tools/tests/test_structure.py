@@ -25,7 +25,7 @@ FUNCTIONS = """
     log_step uart_log usb_attached list_fonts font_label load_font_choice
     save_font_choice load_reader_font get_string_width draw_text
     draw_text_justified new_canvas begin_frame end_frame to_font fit_text
-    list_books list_epubs epub_txt_path book_title read_page_stream
+    list_books list_epubs book_title read_page_stream
     get_page_lines render_page_buffer render_list picker_label render_message
     render_sleep_screen choose_from_list run_picker run_goto
     run_fonts open_picker convert_epub turn_forward turn_back jump_to_percent
