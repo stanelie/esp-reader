@@ -70,6 +70,83 @@ def rotate(src, dst, land_w, land_h, land_stride, nat_w, nat_h, nat_stride,
     if rotation == 3:
         # A whole landscape row lands in one native column, so the destination
         # bit position is fixed for the row and only the byte index moves.
+        #
+        # Where both widths are byte-aligned (true for every panel that uses
+        # this rotation today), a faster path below tests a nibble at a time
+        # instead of walking all 8 bits of every non-blank byte: a page of
+        # text averages a couple of lit pixels per inked byte, so most nibbles
+        # are empty and this skips four destination writes at once for them.
+        # Ported from the reference reader's _rotate_framebuffer, whose own
+        # comment calls this "the slowest pure-Python loop in the project" and
+        # measured the nibble test as a third off the rotation's own time.
+        # x steps by 1 as b runs 0..7, and i(x) = (nat_h-1-x)*nat_stride+col
+        # falls by exactly nat_stride per step - which is why the four
+        # candidate destinations below are one fixed stride apart, computed
+        # once per byte rather than recomputed per bit.
+        if land_w % 8 == 0 and nat_h % 8 == 0:
+            ds1 = nat_stride
+            ds2 = ds1 + ds1
+            ds3 = ds2 + ds1
+            ds4 = ds2 + ds2
+            for y in range(y0, y1):
+                bit = 0x80 >> (y & 7)
+                mask = ~bit & 0xFF
+                col = y >> 3
+                row_base = y * land_stride
+                base0 = (nat_h - 1) * nat_stride + col
+                if invert:
+                    for bx in range(land_stride):
+                        byte = src[row_base + bx]
+                        if byte == 0xFF:
+                            continue
+                        ink = (~byte) & 0xFF
+                        base = base0 - (bx << 3) * nat_stride
+                        if ink & 0xF0:
+                            if ink & 0x80:
+                                dst[base] |= bit
+                            if ink & 0x40:
+                                dst[base - ds1] |= bit
+                            if ink & 0x20:
+                                dst[base - ds2] |= bit
+                            if ink & 0x10:
+                                dst[base - ds3] |= bit
+                        if ink & 0x0F:
+                            base -= ds4
+                            if ink & 0x08:
+                                dst[base] |= bit
+                            if ink & 0x04:
+                                dst[base - ds1] |= bit
+                            if ink & 0x02:
+                                dst[base - ds2] |= bit
+                            if ink & 0x01:
+                                dst[base - ds3] |= bit
+                else:
+                    for bx in range(land_stride):
+                        byte = src[row_base + bx]
+                        if byte == 0xFF:
+                            continue
+                        ink = (~byte) & 0xFF
+                        base = base0 - (bx << 3) * nat_stride
+                        if ink & 0xF0:
+                            if ink & 0x80:
+                                dst[base] &= mask
+                            if ink & 0x40:
+                                dst[base - ds1] &= mask
+                            if ink & 0x20:
+                                dst[base - ds2] &= mask
+                            if ink & 0x10:
+                                dst[base - ds3] &= mask
+                        if ink & 0x0F:
+                            base -= ds4
+                            if ink & 0x08:
+                                dst[base] &= mask
+                            if ink & 0x04:
+                                dst[base - ds1] &= mask
+                            if ink & 0x02:
+                                dst[base - ds2] &= mask
+                            if ink & 0x01:
+                                dst[base - ds3] &= mask
+            return
         for y in range(y0, y1):
             bit = 0x80 >> (y & 7)
             mask = ~bit & 0xFF

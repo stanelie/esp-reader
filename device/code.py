@@ -365,6 +365,16 @@ PANELS = {
         # powered across light sleep, the next partial matches one taken
         # while awake.
         "display_survives_light_sleep": True,
+        # Deep sleep is a full reboot on every board, so build_display() always
+        # does a real hardware reset coming out of it - unlike light sleep,
+        # there is no "does the rail survive" question here. FAST_WAKE's
+        # partial refresh from the sleep screen to the resumed page therefore
+        # hits the same cold-reset-then-partial paleness fixed for light sleep,
+        # every single deep-sleep wake. A full refresh here is comparatively
+        # cheap to accept: deep sleep only follows five minutes of inactivity
+        # or a deliberate hold, nothing like every light-sleep wake between
+        # page turns.
+        "full_refresh_on_deep_wake": True,
         "led": "GPIO25",              # USER_LED
         # VBAT_SENSE reads the cell through a divider that is always connected,
         # so there is no enable line to raise first.
@@ -536,6 +546,28 @@ PIN_KEY_BACK = _pin(PANEL["key_back"])
 PIN_LED = _pin(PANEL.get("led"))
 PIN_ADC_CTRL = _pin(PANEL.get("adc_ctrl"))
 PIN_BATTERY = _pin(PANEL.get("battery"))
+
+# Lit the moment the pin is known, not once the panel and page are ready. The
+# reference reader does the same (its led_on() is one of the first things it
+# runs) - it is the only sign of life before the panel's first refresh, which
+# on this board can be a couple of seconds into boot. Left on continuously
+# through the rest of startup; set_led(False) turns it off once boot
+# completes, further down.
+#
+# PIN_LED is up in the pin block. The E290 build does export board.LED0, but
+# this file deliberately never touches board.*: the same code then runs on a
+# stock ESP32-S3 build, where the name does not exist and referencing it
+# raises at startup, leaving set_led() a silent no-op and taking the only cue
+# away from the hold-to-picker and hold-to-sleep gestures.
+led = None
+try:
+    if PIN_LED is not None:
+        led = digitalio.DigitalInOut(PIN_LED)
+        led.direction = digitalio.Direction.OUTPUT
+        led.value = True
+except Exception:
+    led = None
+
 KEYS_ACTIVE_LOW = PANEL.get("keys_active_low", True)
 INVERT_OUTPUT = PANEL.get("invert_output", False)
 # Everything that reads a button or arms a wake alarm goes through these two,
@@ -750,6 +782,7 @@ SAVE_EVERY_N_TURNS = 10
 KEEP_DISPLAY_POWERED = True
 SHOW_SLEEP_SCREEN = True  # False = leave the page on the panel while asleep (fastest possible wake)
 FAST_WAKE = True  # wake from deep sleep with a partial refresh instead of a full one
+FULL_REFRESH_ON_DEEP_WAKE = PANEL.get("full_refresh_on_deep_wake", False)
 # A reading costs ~16 ms, and 95% of that is the settle - the conversions
 # themselves are ~55 us each. So the way to spend less time and energy on the
 # gauge is to take fewer readings, not cheaper ones.
@@ -1302,21 +1335,8 @@ def ticks_ms_diff(a, b):
     return (a - b) & 0xFFFFFFFF
 
 
-# PIN_LED is up in the pin block. The E290 build does export board.LED0, but
-# this file deliberately never touches board.*: the same code then runs on a
-# stock ESP32-S3 build, where the name does not exist and referencing it raises
-# at startup, leaving set_led() a silent no-op and taking the only cue away from
-# the hold-to-picker and hold-to-sleep gestures.
-led = None
-try:
-    if PIN_LED is not None:
-        led = digitalio.DigitalInOut(PIN_LED)
-        led.direction = digitalio.Direction.OUTPUT
-        led.value = False
-except Exception:
-    led = None
-
-
+# led itself is set up much earlier - see the comment by PIN_LED - so it is
+# lit before the panel and page are ready, not only once they are.
 def set_led(on):
     if led is not None:
         led.value = bool(on)
@@ -1857,6 +1877,9 @@ def display_page(buf, is_full=False):
 
 def show_restored_page(buf):
     if not woke_from_deep_sleep:
+        display_page(buf, is_full=True)
+        return
+    if FULL_REFRESH_ON_DEEP_WAKE:
         display_page(buf, is_full=True)
         return
     if not SHOW_SLEEP_SCREEN:
@@ -2579,9 +2602,7 @@ build_keys()
 
 log_step(f"Rendering restored page (offset {initial_offset} from NVM)...")
 t0 = time.monotonic()
-set_led(True)
 curr_buf = render_page_buffer(current_page_idx)
-set_led(False)
 log_step(f"Page rendered in {time.monotonic() - t0:.2f}s")
 
 t0 = time.monotonic()
@@ -2594,6 +2615,7 @@ prefetch_neighbours(current_page_idx)
 log_step(f"Neighbour pages cached in {time.monotonic() - t0:.2f}s")
 log_step(f"=== BOOT COMPLETE (Total: {time.monotonic() - t_boot_start:.2f}s) ===")
 log_step("boot: reset=%s usb_connected=%s" % (microcontroller.cpu.reset_reason, usb_attached()))
+set_led(False)          # on continuously since PIN_LED was resolved; boot is done
 
 last_activity_time = time.monotonic()
 
