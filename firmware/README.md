@@ -7,16 +7,23 @@ sleep. Everything needed to reproduce that is here.
 install.sh          symlink both boards into a checkout, apply the patch, report drift
 boards/             the two board definitions
 patches/            the CircuitPython change
-prebuilt/           ready-to-flash images + SHA256SUMS
 ```
 
+Ready-to-flash images live on the [Releases page](https://github.com/stanelie/esp-reader/releases)
+now, not in this tree - a merged image is ~1.9 MB and doesn't diff, so it has
+no business in git history. Each release carries `SHA256SUMS` covering every
+asset attached to it.
+
 ## Flashing a prebuilt image
+
+Download `heltec_vision_master_e213.bin` or `heltec_vision_master_e290_lightsleep.bin`
+from the release, verify it against `SHA256SUMS`, then:
 
 Hold **BOOT**, tap **RESET**, release BOOT. The board re-enumerates as
 `303a:1001`. Then, at address **`0x0`**:
 
 ```bash
-python3 ~/circuitpython/ports/espressif/esp-idf/components/esptool_py/esptool/esptool.py --chip esp32s3 write_flash 0x0 prebuilt/heltec_vision_master_e290_lightsleep.bin
+python3 ~/circuitpython/ports/espressif/esp-idf/components/esptool_py/esptool/esptool.py --chip esp32s3 write_flash 0x0 heltec_vision_master_e290_lightsleep.bin
 ```
 
 Or <https://esptool.spacehuhn.com/> from Chrome or Edge, no installation.

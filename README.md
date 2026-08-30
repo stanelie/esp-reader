@@ -18,15 +18,14 @@ firmware/
   install.sh       symlink both boards into a CircuitPython checkout
   boards/          the two board definitions
   patches/         the real-light-sleep patch
-  prebuilt/        ready-to-flash images + checksums
 tools/             font subsetting and BDF -> PCF conversion
 ```
 
 ## Quick start
 
-Flash the image for your board from `firmware/prebuilt/` at **`0x0`**, copy the
-contents of `device/` to CIRCUITPY, drop in a `.txt` book, reset. See
-[`firmware/README.md`](firmware/README.md) and
+Flash the image for your board from the [Releases page](https://github.com/stanelie/esp-reader/releases)
+at **`0x0`**, copy the contents of `device/` to CIRCUITPY, drop in a `.txt`
+book, reset. See [`firmware/README.md`](firmware/README.md) and
 [`device/README.md`](device/README.md).
 
 ## What it does

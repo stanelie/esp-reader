@@ -9,3 +9,7 @@ __pycache__/
 
 # CircuitPython writes this on the drive; it describes the firmware, not the repo.
 device/boot_out.txt
+
+# Release build output - rebuild with tools/build_badger_release.py, attach
+# to a GitHub release. Binary and version-named, no business in git history.
+build/
