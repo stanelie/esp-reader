@@ -56,11 +56,65 @@ def render_goto_screen(pct, out=None):
     return _g("end_frame")(out)
 
 
+def _resolve_tap(release):
+    # Was the tap that just finished the first half of a double-tap, or does
+    # it stand alone? Returns ("single", None), ("double", None), or
+    # ("held", kind) where kind is classify_hold()'s own "picker"/"sleep".
+    #
+    #     The book picker's was_double_tap() decides this from press timing
+    #     alone: if a new KEY_NEXT press starts within DOUBLE_TAP_MS of the
+    #     release, it commits to "double tap" without checking what that new
+    #     press turns out to be. That is safe there because only one gesture
+    #     happens per pass through the main loop. Here it is not: dialling in
+    #     a percentage means tapping repeatedly, then immediately holding to
+    #     confirm - and a hold's press-down lands inside that same window as
+    #     often as a real double-tap's second press does. Measured on this
+    #     board: rapid dial-taps land 530-670 ms apart, a real double-tap
+    #     220-260 ms - DOUBLE_TAP_MS=350 separates those cleanly, so the
+    #     window itself was never the problem. Treating any fast press as a
+    #     confirmed double-tap was: it swallowed the hold's press-down whole,
+    #     including its later release, discarding the confirm gesture and
+    #     silently applying a double-tap's -GOTO_STEP - a reader who dialled
+    #     to 25% and held right away would land 10% off with no warning,
+    #     because the hold never got to run classify_hold() at all.
+    #
+    #     So this waits out the same window, but does not decide from timing
+    #     alone: whatever press arrives gets classified for real, the same
+    #     way any other press does, and only a press that itself resolves as
+    #     a quick "tap" counts as the double-tap's second half. A press that
+    #     resolves as a hold is returned as-is, so the caller can act on it
+    #     as the confirm/cancel gesture it actually was rather than lose it.
+    #
+    deadline = time.monotonic() + _g("DOUBLE_TAP_MS") / 1000.0
+    second = None
+    while time.monotonic() < deadline:
+        second = _g("next_press")()
+        if second is not None:
+            break
+        time.sleep(0.005)
+
+    if second is None:
+        return "single", None
+
+    if (second.key_number != _g("KEY_NEXT")
+            or _g("ticks_ms_diff")(second.timestamp, release) > _g("DOUBLE_TAP_MS")):
+        # Not part of this gesture (KEY_BACK, or arrived just past the
+        # window) - not ours to consume. Replay it on the next pass.
+        R["_stashed_press"] = second
+        return "single", None
+
+    kind, _release = _g("classify_hold")(_g("KEY_NEXT"), second.timestamp)
+    if kind == "tap":
+        return "double", None
+    return "held", kind
+
+
 def run_goto():
     # Percentage picker. Returns the chosen percent, or None to stay put.
     #
     #     Same gesture vocabulary as the book picker - tap moves, hold commits, longer
-    #     hold backs out - so there is nothing new to learn.
+    #     hold backs out - so there is nothing new to learn. See _resolve_tap() for
+    #     why the double-tap check is not the shared was_double_tap().
     #
     #     None means "do not move", and it covers backing out, timing out, *and*
     #     committing the value we arrived on. That last one matters: the number on
@@ -81,18 +135,21 @@ def run_goto():
         start_pct = _g("current_percent")()
         pct = start_pct
         idle_since = time.monotonic()
-        pending_release = None
         _g("drain_events")()
+
+        def _confirm(kind):
+            # Shared tail for a hold, whichever tap led to it.
+            if kind == "picker":
+                if pct == start_pct:
+                    _g("log_step")("Jump-to: %d%% unchanged, keeping the exact "
+                             "position (offset %d)."
+                             % (pct, _g("page_offsets")[_g("current_page_idx")]))
+                    return None
+                return pct
+            return None   # "sleep": hold longer cancels
 
         while True:
             _g("display_page")(render_goto_screen(pct, _ui))
-
-            # The refresh outlasts the double-tap window, so if that tap was really
-            # the first half of a double, the second press is already queued.
-            if pending_release is not None:
-                if _g("was_double_tap")(pending_release):
-                    pct = (pct - 2 * _g("GOTO_STEP")) % (100 + _g("GOTO_STEP"))
-                pending_release = None
 
             while True:
                 event = _g("next_press")()
@@ -108,19 +165,20 @@ def run_goto():
                     break
 
                 kind, release = _g("classify_hold")(_g("KEY_NEXT"), event.timestamp)
-                if kind == "picker":        # hold opens the book here
-                    if pct == start_pct:
-                        _g("log_step")("Jump-to: %d%% unchanged, keeping the exact "
-                                 "position (offset %d)."
-                                 % (pct, _g("page_offsets")[_g("current_page_idx")]))
-                        return None
-                    return pct
-                if kind == "sleep":         # hold longer cancels
-                    return None
-                # Wraps at the top: on a one-button device, getting from 100% back
-                # to 5% should not need twenty double-taps.
+                if kind in ("picker", "sleep"):
+                    return _confirm(kind)
+                # kind == "tap": do not commit to +GOTO_STEP yet - see
+                # _resolve_tap() for why a fast follow-up needs classifying,
+                # not just timing, before deciding what this tap was.
+                outcome, held_kind = _resolve_tap(release)
+                if outcome == "double":
+                    pct = (pct - _g("GOTO_STEP")) % (100 + _g("GOTO_STEP"))
+                    break
+                # "single" or "held": the tap that just finished stands on
+                # its own either way.
                 pct = (pct + _g("GOTO_STEP")) % (100 + _g("GOTO_STEP"))
-                pending_release = release
+                if outcome == "held":
+                    return _confirm(held_kind)
                 break
 
             idle_since = time.monotonic()
