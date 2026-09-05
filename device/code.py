@@ -333,6 +333,12 @@ PANELS = {
         # tuned against the vendor's DDX, and matching its black means feeding
         # the panel the polarity it expects rather than asking it to remap.
         "invert_output": True,
+        # This board holds its own 3V3 rail up through ENABLE_DIO - a hard
+        # reset drops that pin and switches the board off instead of
+        # rebooting it, the same reason the physical reset button does
+        # nothing unplugged. See lib/convboot.py's restart(), the one place
+        # this actually changes behaviour.
+        "power_latched": True,
         # SW_UP / SW_DOWN rather than the A/B/C row: they sit on the right
         # edge where a thumb rests, and the other three are unused - this
         # reader has never had more than two buttons to be worth binding.

@@ -27,29 +27,38 @@ def _nvm():
     return getattr(microcontroller, "nvm", None)
 
 
-def restart(log=None):
+def restart(log=None, power_latched=False):
     # Restart the reader, by whichever route survives on this power source.
     #
     #     On USB: a hard reset, because boot.py has to run - it is the only place
     #     the drive can be hidden and the filesystem handed to the device, and
     #     without that the extractor refuses to write.
     #
-    #     On battery: a soft reload. The Badger latches its own power through
-    #     ENABLE_DIO, and a hard reset drops that pin to its reset state, which
-    #     cuts the 3V3 rail - the board switches off instead of rebooting. It is
-    #     the same reason the reset button does nothing unplugged. A soft reload
+    #     On battery, only for a board whose `power_latched` is True: a soft
+    #     reload. The Badger latches its own power through ENABLE_DIO, and a
+    #     hard reset drops that pin to its reset state, which cuts the 3V3
+    #     rail - the board switches off instead of rebooting. It is the same
+    #     reason the reset button does nothing unplugged. A soft reload
     #     restarts code.py without touching the chip, so the latch holds.
     #
-    #     Skipping boot.py costs nothing there: with no host attached nothing
-    #     else owns the filesystem, so the device can take it itself.
+    #     Every other board gets a hard reset here too, same as on USB. There
+    #     is no rail to protect, and skipping boot.py works against this call
+    #     rather than for it: boot.py is the one place the filesystem handover
+    #     taken by ensure_writable() for the conversion this call follows gets
+    #     recomputed from scratch. Measured on an E213: converting purely on
+    #     battery (the only way this board's converter runs at all) and
+    #     soft-reloading afterwards left the board needing a manual reset -
+    #     every time, not intermittently. A hard reset does not have this
+    #     problem, so it is the default; `power_latched` opts a board out.
     try:
         on_usb = supervisor.runtime.usb_connected
     except Exception:
         on_usb = True
+    hard = on_usb or not power_latched
     if log is not None:
-        log("Restarting via %s." % ("hard reset" if on_usb else "soft reload"))
+        log("Restarting via %s." % ("hard reset" if hard else "soft reload"))
     time.sleep(2)
-    if on_usb:
+    if hard:
         microcontroller.reset()
     else:
         supervisor.reload()
@@ -74,6 +83,10 @@ def clear():
         pass
 
 
+def _power_latched(R):
+    return bool(R.get("PANEL", {}).get("power_latched"))
+
+
 def queue(path, R):
     # Record the path and restart. Never returns.
     log = R["log_step"]
@@ -89,10 +102,10 @@ def queue(path, R):
     try:
         R["display_page"](R["render_message_into"](
             R["_take_buf"](), "Converting",
-            [R["book_title"](path), "", "Restarting to make room..."]))
+            [R["book_title"](path), "", "Please wait..."]))
     except Exception:
         pass
-    restart(log)
+    restart(log, _power_latched(R))
 
 
 def run(path, R):
@@ -181,4 +194,4 @@ def run(path, R):
         log("Converted; restarting into %s" % made)
     else:
         log("Conversion produced nothing; restarting.")
-    restart(log)
+    restart(log, _power_latched(R))

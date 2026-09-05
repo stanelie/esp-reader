@@ -395,15 +395,8 @@ def _resolve(base_member, href):
     return (base + "/" + href) if base else href
 
 
-def find_cover_member(uzf):
-    """Path of the cover image inside the EPUB, or None.
-
-    Tries what the EPUB actually declares first - the OPF names the cover
-    either through <meta name="cover" content="ID"> (EPUB 2) or an item with
-    properties="cover-image" (EPUB 3) - and only then guesses by filename.
-    """
-    names = uzf.namelist()
-
+def _find_opf_name(uzf):
+    """Path of the package (.opf) document inside the EPUB, or None."""
     opf_name = None
     try:
         container = uzf.read("META-INF/container.xml")
@@ -415,10 +408,70 @@ def find_cover_member(uzf):
     except Exception:
         pass
     if opf_name is None:
-        for n in names:
+        for n in uzf.namelist():
             if n.lower().endswith(".opf"):
                 opf_name = n
                 break
+    return opf_name
+
+
+def spine_order(uzf):
+    """Chapter members in the order the EPUB itself declares, per its OPF
+    spine - or None if the OPF is missing or malformed.
+
+    The spine is the one authority for reading order. A Calibre-style
+    ..._split_NNN.html name only tells you a file is a fragment of some
+    chapter that was too big for one piece - the fragment number resets
+    per chapter, so sorting by it alone (as the caller's own fallback used
+    to, and as a plain filename sort would too) interleaves nothing: every
+    chapter's first fragment sorts before every chapter's second, which
+    means the whole book reads as N chapter openings back to back followed
+    by N chapter bodies. Reading the spine avoids needing to know that
+    convention exists at all, and works for any EPUB, Calibre-split or not.
+    """
+    opf_name = _find_opf_name(uzf)
+    if not opf_name:
+        return None
+    try:
+        # A chapter decompressed through the pure-Python fallback inflater
+        # (see inflate.py) comes back bytearray-backed, not bytes, to reuse
+        # its one 32KB window instead of copying - and unlike bytes, a
+        # bytearray is not hashable. _tags()/_attr() slice straight out of
+        # whatever `opf` is, so using one of their results as a dict key
+        # without decoding it first works by accident on the host (CPython's
+        # zlib.decompress() always returns bytes) and raises on the device
+        # the moment the fallback path is the one that ran. Decoding to str
+        # immediately sidesteps the whole question.
+        opf = uzf.read(opf_name)
+        id_to_href = {}
+        for tag in _tags(opf, b"item "):    # trailing space excludes <itemref
+            item_id = _attr(tag, b"id")
+            href = _attr(tag, b"href")
+            if item_id and href:
+                id_to_href[item_id.decode("utf-8", "ignore")] = \
+                    href.decode("utf-8", "ignore")
+
+        order = []
+        for tag in _tags(opf, b"itemref"):
+            idref = _attr(tag, b"idref")
+            href = id_to_href.get(idref.decode("utf-8", "ignore")) if idref else None
+            if href:
+                order.append(_resolve(opf_name, href))
+        return order or None
+    except Exception as e:
+        log_status("Spine parse failed: %s" % e)
+        return None
+
+
+def find_cover_member(uzf):
+    """Path of the cover image inside the EPUB, or None.
+
+    Tries what the EPUB actually declares first - the OPF names the cover
+    either through <meta name="cover" content="ID"> (EPUB 2) or an item with
+    properties="cover-image" (EPUB 3) - and only then guesses by filename.
+    """
+    names = uzf.namelist()
+    opf_name = _find_opf_name(uzf)
 
     if opf_name:
         try:
@@ -714,20 +767,48 @@ def run_extraction(epub_path, progress=None, window=None):
                 pass
             mem_note("After cover")
 
-            numbered = []
-            plain = []
-            for member in uzf.namelist():
-                if member.endswith("/"):
-                    continue
-                if member.lower().endswith((".html", ".htm", ".xhtml")):
+            html_list = [
+                m for m in uzf.namelist()
+                if not m.endswith("/")
+                and m.lower().endswith((".html", ".htm", ".xhtml"))]
+            html_members = set(html_list)
+
+            ordered = None
+            spine = spine_order(uzf)
+            if spine:
+                spined = [m for m in spine if m in html_members]
+                if spined:
+                    # Trust the spine for what it lists. A file it omits is
+                    # usually something not meant to be read in sequence at
+                    # all (footnotes, a colophon) rather than a sign the
+                    # spine itself is wrong - so append it after, rather than
+                    # discarding a correct spine over an incomplete one.
+                    spined_set = set(spined)
+                    leftover = [m for m in html_list if m not in spined_set]
+                    ordered = spined + leftover
+                    log_status("Chapter order: EPUB spine (%d files, %d not "
+                               "in spine)" % (len(spined), len(leftover)))
+
+            if ordered is None:
+                # No usable spine - the same guess this always made: group
+                # Calibre's ..._split_NNN fragments by fragment number. Wrong
+                # for a book with more than one multi-fragment chapter (see
+                # spine_order()'s docstring), but a chapter's own text is
+                # still intact, and this only fires when there is no spine to
+                # read at all.
+                numbered = []
+                plain = []
+                for member in html_list:
                     is_num, num = _is_numbered_html(member)
                     if is_num:
                         numbered.append((num, member))
                     else:
                         plain.append(member)
+                numbered.sort(key=lambda x: x[0])
+                ordered = plain + [m for _, m in numbered]
+                log_status("Chapter order: filename fallback (%d files)"
+                           % len(ordered))
 
-            numbered.sort(key=lambda x: x[0])
-            ordered = plain + [m for _, m in numbered]
             total = len(ordered)
             log_status("Files to process: %d" % total)
             _notify(progress, "start", 0, total, base_name)
