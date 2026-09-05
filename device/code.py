@@ -395,6 +395,19 @@ PANELS = {
         # or a deliberate hold, nothing like every light-sleep wake between
         # page turns.
         "full_refresh_on_deep_wake": True,
+        # Deep sleep here is a power off, not a sleeping chip.
+        #
+        # Measured with a PPK2: the RP2040 in this board's deep sleep is
+        # already fully dormant, and the 1 mA left is the board - the 3V3
+        # regulator, the panel sitting powered, the divider. Nothing the
+        # firmware does reaches that, but the board latches its own rail and
+        # can simply drop it. A cell that would go flat in weeks on a shelf
+        # then lasts as long as its self-discharge allows.
+        #
+        # Costs nothing extra on wake: deep sleep on this board was always a
+        # full reboot (see full_refresh_on_deep_wake), and the panel holds
+        # the sleep screen with no power at all.
+        "power_off_on_deep_sleep": True,
         "led": "GPIO25",              # USER_LED
         # VBAT_SENSE reads the cell through a divider that is always connected,
         # so there is no enable line to raise first.
@@ -803,6 +816,7 @@ KEEP_DISPLAY_POWERED = True
 SHOW_SLEEP_SCREEN = True  # False = leave the page on the panel while asleep (fastest possible wake)
 FAST_WAKE = True  # wake from deep sleep with a partial refresh instead of a full one
 FULL_REFRESH_ON_DEEP_WAKE = PANEL.get("full_refresh_on_deep_wake", False)
+POWER_OFF_ON_DEEP_SLEEP = PANEL.get("power_off_on_deep_sleep", False)
 # A reading costs ~16 ms, and 95% of that is the settle - the conversions
 # themselves are ~55 us each. So the way to spend less time and energy on the
 # gauge is to take fewer readings, not cheaper ones.
@@ -2508,6 +2522,42 @@ def enter_light_sleep():
     return key, held_ms, release_ticks
 
 
+def power_off():
+    # Drop the board's own 3V3 rail. Does not return if it works.
+    #
+    #     False means the rail is still up and the caller should fall through to
+    #     an ordinary deep sleep. That is the USB case: the cable feeds the rail
+    #     and nothing here can switch it off, which the Badger's own halt()
+    #     documents by returning rather than failing.
+    #
+    #     The one place this file touches board.*, and it has no choice. GPIO10
+    #     is constructed during board_init and marked never_reset, so claiming
+    #     the raw pin raises "in use" - the board hands out the DigitalInOut it
+    #     already built. Both routes are tried because only the second exists on
+    #     a stock Badger build: badger2040.halt() is this board definition's own.
+    #
+    #     Waking is a cold boot, not a wake: the reader comes back through the
+    #     same path as any power-on and reads its position from NVM. Which is
+    #     why save_position(force=True) above this is not optional.
+    try:
+        import badger2040
+        badger2040.halt()
+    except Exception:
+        try:
+            import board
+            board.ENABLE_DIO.value = False
+        except Exception as e:
+            log_step("Could not power off (%s); sleeping instead." % e)
+            return False
+    # The rail takes a moment to collapse, and execution continues while it
+    # does. Anything after this on battery is never reached.
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 0.5:
+        pass
+    log_step("Rail still up - on USB, so sleeping instead of powering off.")
+    return False
+
+
 def enter_deep_sleep():
     global led, adc_ctrl, vbus_sense
 
@@ -2556,6 +2606,13 @@ def enter_deep_sleep():
     # returns as soon as the hold threshold is crossed), so the finger may still
     # be on it. Arming a level-triggered PinAlarm now would wake us instantly.
     wait_buttons_released()
+
+    # After wait_buttons_released(), never before it. The gesture that gets
+    # here is a long hold, so the finger is still down - and this board's
+    # rail is re-latched by the buttons themselves, so cutting power with one
+    # held switches the board straight back on again.
+    if POWER_OFF_ON_DEEP_SLEEP:
+        power_off()         # returns only if the rail could not be cut
 
     wake_btn_next = alarm.pin.PinAlarm(pin=PIN_KEY_NEXT, value=KEY_DOWN, pull=True)
     wake_btn_prev = alarm.pin.PinAlarm(pin=PIN_KEY_BACK, value=KEY_DOWN, pull=True)

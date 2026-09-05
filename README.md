@@ -1,12 +1,20 @@
 # esp-reader
 
-A streaming e-book reader for the Heltec Vision Master **E213** and **E290**,
-in CircuitPython, with the firmware work needed to make it sip power.
+A streaming e-book reader for the Heltec Vision Master **E213** and **E290**
+and the Pimoroni **Badger 2040**, in CircuitPython, with the firmware work
+needed to make it sip power.
 
-One `code.py` runs on both boards. Of ~1150 lines, eleven differ between them —
-six e-paper pins, the panel rotation, the driver class, and two battery
-calibration constants — so the differences live in a table at the top of the
-file and the board is detected at boot from `board.board_id`.
+One `code.py` runs on all three. Everything that differs between them — the
+e-paper pins, panel rotation, driver class, button polarity, battery
+calibration and the sleep behaviour each board's hardware allows — lives in a
+table at the top of the file, and the board is detected at boot from
+`board.board_id`.
+
+The Badger is the exception on one point: its RP2040 cannot compile this file
+at boot and still have a contiguous 4736-byte block left for a page buffer, so
+that board runs a precompiled build (a one-line `code.py` importing
+`lib/ereader.mpy`). `tools/build_badger_release.py` produces it, and the
+Releases page carries it ready to copy.
 
 ```
 device/            copy the CONTENTS of this to the CIRCUITPY drive
@@ -48,6 +56,28 @@ Measured on the E213 with a PPK2, USB disconnected, 4 V into the battery input:
 | light sleep, stock CircuitPython | 43.2 mA |
 | light sleep, patched | **1.1 mA** |
 | deep sleep | 16.4 µA |
+
+And on the Badger 2040 (RP2040), same instrument, one page every 10 s:
+
+| state | stock | patched |
+|---|---|---|
+| awake, 125 MHz | 25 mA | 25 mA |
+| light sleep | 16 mA | **2 mA** |
+| deep sleep | 1 mA | **3 µA** |
+| reader average, 1 page / 10 s | 18 mA | **5 mA** |
+
+Two separate problems, one per row. Light sleep on RP2040 barely sleeps:
+CircuitPython's masks gate clock *distribution* and leave clk_sys and both
+PLLs running, while the 1024 Hz supervisor tick drags the core out of WFI
+every 977 µs. `firmware/patches/0002-rp2-real-light-sleep.patch` fixes both —
+1 mA of the remaining 2 mA is the board itself, measured by putting the chip
+in XOSC dormant and reading what was left.
+
+Deep sleep was the other 1 mA, and no firmware reaches it: that is the
+regulator and the panel sitting powered. This board latches its own rail, so
+deep sleep now drops it and switches the board off outright. Waking is a cold
+boot on any button — which cost nothing, because deep sleep here was always a
+full reboot.
 
 Stock CircuitPython does not power-gate in light sleep — it spins in a WFI loop,
 and upstream says so in a comment. The patch in `firmware/patches/` makes
