@@ -1,0 +1,199 @@
+diff --git a/ports/raspberrypi/common-hal/alarm/__init__.c b/ports/raspberrypi/common-hal/alarm/__init__.c
+index c47ddc3150..3756a8d378 100644
+--- a/ports/raspberrypi/common-hal/alarm/__init__.c
++++ b/ports/raspberrypi/common-hal/alarm/__init__.c
+@@ -28,6 +28,9 @@
+ #include "pico/stdlib.h"
+ #include "hardware/sync.h"
+ #include "hardware/clocks.h"
++#if CIRCUITPY_USB_DEVICE
++#include "tusb.h"
++#endif
+ #include "hardware/xosc.h"
+ #include "hardware/structs/scb.h"
+ #include "hardware/watchdog.h"
+@@ -67,6 +70,111 @@ const uint32_t RP_LIGHTSLEEP_EN0_MASK_HARSH = (
+     );
+ const uint32_t RP_LIGHTSLEEP_EN1_MASK_HARSH = 0x0;
+ 
++#ifndef CIRCUITPY_RP2_REAL_LIGHT_SLEEP
++#define CIRCUITPY_RP2_REAL_LIGHT_SLEEP (0)
++#endif
++
++#if CIRCUITPY_RP2_REAL_LIGHT_SLEEP
++// A light sleep that actually rests.
++//
++// The stock masks above gate a handful of peripherals and leave clk_sys
++// running to the rest of the chip, which is why the comment on
++// RP_LIGHTSLEEP_EN0_MASK says it "only saves about 2mA right now". Measured
++// on a Badger 2040 at 125 MHz: 25 mA in a busy loop against 16 mA in light
++// sleep. The 9 mA is the core halting; everything else stays clocked, so the
++// floor is essentially "idle at 125 MHz" rather than anything resembling
++// sleep. Deep sleep on the same silicon uses the HARSH masks and is orders
++// of magnitude lower, so the capability was never missing - light sleep just
++// did not ask for it.
++//
++// This keeps only what has to survive the WFI:
++//   CLK_RTC_RTC + CLK_SYS_RTC   a TimeAlarm wakes through the RTC alarm
++//   CLK_SYS_PADS + CLK_SYS_IO   a PinAlarm wakes through a GPIO edge
++//   CLK_SYS_TIMER               time_us_64(), which is what monotonic reads
++//   CLK_SYS_WATCHDOG            feeds TIMER its 1 us tick
++//
++// Everything else - SPI, PIO, DMA, UART, USB, XIP, the SRAM banks and the
++// bus fabric - is a clock gate, not a power gate, so state survives and the
++// hardware restores wake_en before the core fetches its next instruction.
++// The deep sleep path proves that: it gates strictly more than this and
++// still executes the lines after its own __wfi().
++const uint32_t RP_LIGHTSLEEP_EN0_MASK_REST = (
++    CLOCKS_SLEEP_EN0_CLK_RTC_RTC_BITS |
++    CLOCKS_SLEEP_EN0_CLK_SYS_RTC_BITS |
++    CLOCKS_SLEEP_EN0_CLK_SYS_PADS_BITS |
++    CLOCKS_SLEEP_EN0_CLK_SYS_IO_BITS
++    );
++const uint32_t RP_LIGHTSLEEP_EN1_MASK_REST = (
++    CLOCKS_SLEEP_EN1_CLK_SYS_TIMER_BITS |
++    CLOCKS_SLEEP_EN1_CLK_SYS_WATCHDOG_BITS
++    );
++
++// Masking sleep_en gates clock DISTRIBUTION and does nothing about the clock
++// SOURCES, which is where the rest of the current turned out to be. Measured
++// on a Badger 2040 with the masks and the tick fix already in: 10 mA asleep,
++// against 1 mA with the same board in XOSC dormant on the same rig. That 9 mA
++// is PLL_SYS, PLL_USB and friends still spinning through the WFI - not the
++// regulator, not the panel, not the board.
++//
++// So run clk_sys from the crystal for the duration and stop the PLLs.
++//
++//     ORDER MATTERS HERE. clk_rtc is fed from PLL_USB by default and a
++//     TimeAlarm wakes through the RTC alarm, so stopping PLL_USB without
++//     moving clk_rtc onto the crystal first gives a board that sleeps and
++//     never comes back.
++//
++// PLL_USB is only stopped when USB is not enumerated: it clocks the USB
++// peripheral that RUN_BACKGROUND_TASKS touches on every pass of the loop
++// below. tud_ready() is the same predicate supervisor.runtime.usb_connected
++// reports, so this agrees by construction with whatever Python-side guard the
++// caller used to decide it was safe to sleep.
++static uint32_t _saved_sys_hz;
++static bool _stopped_pll_usb;
++
++static void _light_sleep_clocks_down(void) {
++    _saved_sys_hz = clock_get_hz(clk_sys);
++
++    // clk_peri first: it is fed from clk_sys, which is about to lose the PLL
++    // behind it.
++    clock_configure(clk_peri, 0,
++        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, XOSC_HZ, XOSC_HZ);
++
++    // clk_sys onto clk_ref, which is the crystal, leaving PLL_SYS unused.
++    clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLK_REF, 0,
++        clock_get_hz(clk_ref), clock_get_hz(clk_ref));
++    pll_deinit(pll_sys);
++
++    _stopped_pll_usb = false;
++    #if CIRCUITPY_USB_DEVICE
++    if (tud_ready()) {
++        return;
++    }
++    #endif
++    clock_configure(clk_rtc, 0,
++        CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_XOSC_CLKSRC, XOSC_HZ, 46875);
++    pll_deinit(pll_usb);
++    _stopped_pll_usb = true;
++}
++
++static void _light_sleep_clocks_up(void) {
++    if (_stopped_pll_usb) {
++        // 12 MHz / 1 * 480 / (5 * 2) = 48 MHz, the stock RP2040 USB PLL.
++        pll_init(pll_usb, 1, 480000000, 5, 2);
++        clock_configure(clk_usb, 0,
++            CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48000000, 48000000);
++        clock_configure(clk_rtc, 0,
++            CLOCKS_CLK_RTC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48000000, 46875);
++        _stopped_pll_usb = false;
++    }
++    // Brings PLL_SYS back and puts clk_sys and clk_peri on it. Has to run
++    // after PLL_USB is up, because it parks clk_sys on PLL_USB while PLL_SYS
++    // re-locks. Restores the frequency that was actually in use rather than
++    // the compiled-in default, so a board that changed
++    // microcontroller.cpu.frequency keeps it across a sleep.
++    set_sys_clock_khz(_saved_sys_hz / 1000, true);
++}
++#endif
++
+ static void prepare_for_dormant_xosc(void);
+ 
+ // Singleton instance of SleepMemory.
+@@ -137,6 +245,35 @@ mp_obj_t common_hal_alarm_record_wake_alarm(void) {
+ }
+ 
+ mp_obj_t common_hal_alarm_light_sleep_until_alarms(size_t n_alarms, const mp_obj_t *alarms) {
++    #if CIRCUITPY_RP2_REAL_LIGHT_SLEEP
++    // Before _setup_sleep_alarms(), deliberately.
++    //
++    // That call ends in rtc_set_alarm(), and _light_sleep_clocks_down() moves
++    // clk_rtc from PLL_USB to the crystal. clk_rtc has no glitchless mux, so
++    // switching its source under an already-armed alarm leaves the match
++    // hardware in a state that never fires: the chip sleeps perfectly and
++    // nothing ever wakes it. Measured exactly that way round - 1 mA asleep,
++    // no wake - before the order was swapped. Arm the alarm against the clock
++    // it will actually be counting on.
++    //
++    // The other half of the job is stopping the 1024 Hz supervisor tick.
++    //
++    // Pruning the clocks is only half the job: port_enable_tick() arms a
++    // hardware alarm every 977 us and _tick_callback re-arms it, so the core
++    // is pulled out of WFI a thousand times a second to run background tasks
++    // it has nothing to do. Left running, that alone keeps the chip out of
++    // any low-power state no matter how much of it the masks gate.
++    //
++    // Safe to stop here, for two reasons that both had to be checked rather
++    // than assumed. Monotonic time does not come from these ticks -
++    // port_get_raw_ticks() reads time_us_64(), the free-running hardware
++    // timer, whose clock the mask above deliberately keeps. And neither wake
++    // source is this alarm: a TimeAlarm arms the RTC (rtc_set_alarm), a
++    // PinAlarm arms a GPIO edge, while the tick owns hardware_alarm 0.
++    port_disable_tick();
++    _light_sleep_clocks_down();
++    #endif
++
+     _setup_sleep_alarms(false, n_alarms, alarms);
+ 
+     mp_obj_t wake_alarm = mp_const_none;
+@@ -145,6 +282,7 @@ mp_obj_t common_hal_alarm_light_sleep_until_alarms(size_t n_alarms, const mp_obj
+     uint32_t saved_sleep_en0 = clocks_hw->sleep_en0;
+     uint32_t saved_sleep_en1 = clocks_hw->sleep_en1;
+ 
++
+     while (!mp_hal_is_interrupted()) {
+         RUN_BACKGROUND_TASKS;
+         // Detect if interrupt was alarm or ctrl-C interrupt.
+@@ -168,8 +306,13 @@ mp_obj_t common_hal_alarm_light_sleep_until_alarms(size_t n_alarms, const mp_obj
+         }
+ 
+         // Prune the clocks for sleep.
++        #if CIRCUITPY_RP2_REAL_LIGHT_SLEEP
++        clocks_hw->sleep_en0 &= RP_LIGHTSLEEP_EN0_MASK_REST;
++        clocks_hw->sleep_en1 = RP_LIGHTSLEEP_EN1_MASK_REST;
++        #else
+         clocks_hw->sleep_en0 &= RP_LIGHTSLEEP_EN0_MASK;
+         clocks_hw->sleep_en1 = RP_LIGHTSLEEP_EN1_MASK;
++        #endif
+ 
+         // Enable System Control Block (SCB) deep sleep
+         scb_hw->scr |= M0PLUS_SCR_SLEEPDEEP_BITS;
+@@ -177,6 +320,14 @@ mp_obj_t common_hal_alarm_light_sleep_until_alarms(size_t n_alarms, const mp_obj
+         __wfi();
+     }
+ 
++    #if CIRCUITPY_RP2_REAL_LIGHT_SLEEP
++    _light_sleep_clocks_up();
++    // Back on before the VM runs again: everything above this line was for
++    // the sleep, and the tick is what the supervisor's housekeeping rides on
++    // once code is executing.
++    port_enable_tick();
++    #endif
++
+     // Restore clocks so other wfi() uses, like time.sleep(), won't use the light-sleep settings.
+     clocks_hw->sleep_en0 = saved_sleep_en0;
+     clocks_hw->sleep_en1 = saved_sleep_en1;

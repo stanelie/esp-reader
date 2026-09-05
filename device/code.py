@@ -354,9 +354,23 @@ PANELS = {
         # slept the full deadline in isolation. The cost is that BACK cannot
         # wake the reader; it still works while awake.
         "single_wake_alarm": True,
-        # RP2040 light sleep is not the ESP32's busy-loop, so there is no
-        # reason to bail out to deep sleep early: rest for the full five
-        # minutes like the patched boards do.
+        # Five minutes before dropping to deep sleep, same as the patched
+        # ESP boards - but for a reason this comment used to get wrong.
+        #
+        # It claimed RP2040 light sleep "is not the ESP32's busy-loop". On
+        # stock CircuitPython it very nearly is: measured on this board with
+        # a PPK2, 25 mA awake against 16 mA "asleep", because the port's
+        # sleep_en masks gate a handful of peripherals and leave clk_sys and
+        # both PLLs running, while the 1024 Hz supervisor tick drags the core
+        # out of WFI every 977 us. Upstream says so itself in the comment on
+        # RP_LIGHTSLEEP_EN0_MASK: "this only saves about 2mA right now".
+        #
+        # firmware/patches/0002-rp2-real-light-sleep.patch fixes that and
+        # takes the floor to 2 mA, against 1 mA for the board with the chip
+        # fully dormant - so there is now very little left to win. Resting
+        # five minutes is the right call ON THAT FIRMWARE. On a stock build
+        # it costs 16 mA for five minutes after every page, and the number
+        # to change is this one.
         "sleep_timeout": 300,
         # ESP32 light sleep really does power-gate peripherals, which is why
         # teardown_display()/build_display() rebuild the panel from scratch

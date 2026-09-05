@@ -77,6 +77,72 @@ board, taken at the commit in `.upstream-base`. `install.sh` diffs them and
 prints the `cp` line for anything that has moved, so drift is something you find
 on purpose rather than by debugging a stale `board.c`.
 
+## The RP2040 patch (Badger 2040)
+
+`patches/0002-rp2-real-light-sleep.patch` is the same idea for the other
+chip: stock CircuitPython's `alarm.light_sleep_until_alarms()` on RP2040
+barely sleeps. Measured on a Badger 2040 with a PPK2, one page every 10 s:
+
+| state | stock | patched |
+|---|---|---|
+| awake, 125 MHz | 25 mA | 25 mA |
+| light sleep | 16 mA | **2 mA** |
+| reader average, 1 page / 10 s | 18 mA | **5 mA** |
+
+1 mA of that 2 mA is the board itself — regulator, panel, divider — measured
+by putting the chip in XOSC dormant and reading what was left. So the chip's
+own share went from ~15 mA to ~1 mA, and there is close to nothing else to
+win without powering the board down.
+
+Two things were wrong, and fixing only one of them buys 6 mA of the 14:
+
+- **The clock masks gate distribution, not sources.** The port's
+  `RP_LIGHTSLEEP_EN0_MASK` gates a handful of peripherals and leaves clk_sys
+  running to the rest of the chip, so the floor was "idle at 125 MHz".
+  Upstream says so in its own comment: `this only saves about 2mA right now`.
+  The patch adds a mask keeping only what the wake path needs, then runs
+  clk_sys from the crystal and stops both PLLs.
+- **The 1024 Hz supervisor tick keeps firing.** `port_enable_tick()` arms a
+  hardware alarm every 977 µs and `_tick_callback` re-arms it, so the core is
+  pulled out of WFI a thousand times a second no matter what the masks say.
+  The patch stops it for the duration and restores it on every exit path.
+
+**Order matters, and getting it wrong is silent.** `clk_rtc` is fed from
+PLL_USB, a TimeAlarm wakes through the RTC alarm, and `clk_rtc` has no
+glitchless mux — so lowering the clocks *after* `_setup_sleep_alarms()` has
+called `rtc_set_alarm()` leaves the match hardware in a state that never
+fires. That failure looks like success: the board sleeps perfectly at 1 mA
+and simply never wakes. The clocks are lowered before the alarm is armed for
+this reason. The `clk_rtc` divisor is chosen to hold the RTC's rate exactly
+(XOSC 12 MHz ÷ 256 = 46875 Hz, the same as PLL_USB 48 MHz ÷ 1024), because
+the alarm is an absolute time and a rate change would move it.
+
+PLL_USB is only stopped when USB is not enumerated — it clocks the peripheral
+`RUN_BACKGROUND_TASKS` touches on every pass of the sleep loop. The test is
+`tud_ready()`, which is exactly what `supervisor.runtime.usb_connected`
+reports, so the firmware and any Python-side guard agree by construction.
+
+Opt-in per board, like the ESP one:
+`#define CIRCUITPY_RP2_REAL_LIGHT_SLEEP (1)` in `mpconfigboard.h` — the
+header, not the `.mk`, for the reason given below.
+
+```bash
+cd ~/circuitpython && source venv/bin/activate
+export PATH=/opt/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi/bin:$PATH
+cd ports/raspberrypi && make BOARD=pimoroni_badger2040_stan -j$(nproc)
+```
+
+Needs **GCC 14+** (CircuitPython refuses to build on 13, which miscompiles
+it) and the build venv for `cascadetoml`. Verify the define survived the
+same way as the ESP build:
+
+```bash
+arm-none-eabi-nm build-pimoroni_badger2040_stan/common-hal/alarm/__init__.o \
+  | grep -E "pll_deinit|port_disable_tick"
+```
+
+Both should appear as undefined references. Neither does without the define.
+
 ## The patch
 
 `patches/0001-opt-in-real-light-sleep.patch` touches one file,
